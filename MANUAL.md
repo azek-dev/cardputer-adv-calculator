@@ -125,6 +125,20 @@ no battery-backed clock to carry it forward, so run `settime` again after
 each boot if you want timestamps. Once set, `save` entries are stamped with
 the time they were written, e.g. `---- save #2 (4 entries, RAD) @ 09:47:12 ----`.
 
+## Reading the SD card without removing it
+
+Type `usbdrive` and press `Enter` to expose the microSD card directly to a
+computer over the same USB-C cable — it shows up as an ordinary USB drive,
+so you can drag `calc_log.txt` out (or copy anything onto the card) without
+ever popping the card out.
+
+This takes over the SD card and USB connection for that one purpose: **the
+calculator stops responding to the keyboard once you do this**, and the
+only way back is to reset or power-cycle the device. There's no in-between
+state, so only use it when you're done calculating for now. If no card is
+inserted (or it fails to initialize), the calculator shows `SD ERR` instead
+and keeps working normally.
+
 ## Function reference
 
 Trig functions respect the DEG/RAD toggle above.

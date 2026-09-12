@@ -28,6 +28,9 @@ on the built-in QWERTY keyboard and evaluate them with Enter — like
   text to `calc_log.txt` on a microSD card
 - `settime(H,M,S)` / `time` — a simple software clock (no RTC chip on this
   hardware), timestamps `save` entries; resets on power-cycle
+- `usbdrive` — expose the microSD card to a computer over USB as an
+  ordinary drive, no card removal needed (requires a reset to return to
+  the calculator afterward)
 
 ## Keys
 
@@ -60,6 +63,12 @@ pio run -t upload    # build and flash over USB-C
 
 The board target (`m5stack-stamps3`) auto-detects both the original
 Cardputer and Cardputer ADV at runtime.
+
+## Credits
+
+The raw SD-over-SPI block I/O routines behind the `usbdrive` command are
+adapted from [MOY-lightening-firmware/M5-cardputer-mass-storage](https://github.com/MOY-lightening-firmware/M5-cardputer-mass-storage)
+(MIT License, Copyright (c) 2026 OZAN).
 
 ## License
 

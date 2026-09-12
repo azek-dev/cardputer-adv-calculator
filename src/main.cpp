@@ -48,6 +48,15 @@
 // there's no real clock by default. "settime(H,M,S)" sets a reference time
 // (from millis() elapsed since); "time" shows the current computed time.
 // This resets on every power-cycle — re-run settime() after each boot.
+//
+// Type "usbdrive" and press Enter to expose the microSD card to a computer
+// over the same USB-C cable, as an ordinary USB drive — no card removal
+// needed. This takes over the SD card and the USB port for that purpose;
+// the calculator only works normally again after a reset/power-cycle. The
+// raw SD-over-SPI block I/O routines (mscSdRawInit/mscReadSector/
+// mscWriteSector below) are adapted from MOY-lightening-firmware's
+// "M5-cardputer-mass-storage" (MIT License, Copyright (c) 2026 OZAN),
+// https://github.com/MOY-lightening-firmware/M5-cardputer-mass-storage
 
 #include <M5Cardputer.h>
 #include <M5GFX.h>
@@ -55,6 +64,8 @@
 #include <Preferences.h>
 #include <SPI.h>
 #include <SD.h>
+#include <USB.h>
+#include <USBMSC.h>
 #include <cmath>
 #include <vector>
 #include <string>
@@ -71,9 +82,254 @@ static const int SD_SPI_MOSI_PIN = 14;
 static const int SD_SPI_CS_PIN = 12;
 static const char* SD_LOG_PATH = "/calc_log.txt";
 static bool sdReady = false;
+static uint32_t sdSectorCount = 0; // populated at boot while SD.h has it mounted
 
 static Preferences prefs;
 static const char* PREFS_NS = "calc";
+
+// ---------------------------------------------------------------------
+// USB Mass Storage: exposes the microSD card directly to a host computer
+// over USB, without going through this sketch's normal FAT-mounted SD.h
+// access. Needs raw sector-level SD-over-SPI I/O (a different protocol
+// layer from SD.h/SdFat), adapted from the MIT-licensed reference noted
+// above. Once entered (via the "usbdrive" command), the calculator no
+// longer functions until reset — this mirrors the reference design and
+// avoids the two very different SD access layers running at once.
+// ---------------------------------------------------------------------
+static const uint32_t MSC_SECTOR_SIZE = 512;
+static USBMSC MSC;
+static SPIClass mscSPI(HSPI);
+static bool mscCardIsHC = false;
+static bool mscModeActive = false;
+
+static uint8_t mscSdTransfer(uint8_t b) { return mscSPI.transfer(b); }
+
+static void mscSdSelect() {
+    digitalWrite(SD_SPI_CS_PIN, LOW);
+    delayMicroseconds(1);
+}
+
+static void mscSdDeselect() {
+    digitalWrite(SD_SPI_CS_PIN, HIGH);
+    mscSPI.transfer(0xFF);
+}
+
+static uint8_t mscSdCmd(uint8_t cmd, uint32_t arg) {
+    mscSdDeselect();
+    mscSdTransfer(0xFF);
+    mscSdSelect();
+
+    mscSdTransfer(0x40 | cmd);
+    mscSdTransfer((arg >> 24) & 0xFF);
+    mscSdTransfer((arg >> 16) & 0xFF);
+    mscSdTransfer((arg >> 8) & 0xFF);
+    mscSdTransfer(arg & 0xFF);
+
+    uint8_t crc = 0xFF;
+    if (cmd == 0) crc = 0x95;
+    if (cmd == 8) crc = 0x87;
+    mscSdTransfer(crc);
+
+    uint8_t r = 0xFF;
+    for (int i = 0; i < 8; i++) {
+        r = mscSdTransfer(0xFF);
+        if (!(r & 0x80)) break;
+    }
+    return r;
+}
+
+// Re-initializes the SD card at the raw SPI protocol level (independent
+// of SD.h's FAT mount, which must already be released via SD.end()).
+static bool mscSdRawInit() {
+    mscSPI.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
+    mscSdDeselect();
+    for (int i = 0; i < 10; i++) mscSdTransfer(0xFF);
+
+    if (mscSdCmd(0, 0) != 0x01) {
+        mscSPI.endTransaction();
+        return false;
+    }
+
+    bool v2 = false;
+    if (mscSdCmd(8, 0x000001AA) == 0x01) {
+        uint8_t r7[4];
+        for (int i = 0; i < 4; i++) r7[i] = mscSdTransfer(0xFF);
+        if (r7[2] == 0x01 && r7[3] == 0xAA) v2 = true;
+    }
+
+    uint32_t deadline = millis() + 2000;
+    uint8_t r;
+    do {
+        mscSdCmd(55, 0);
+        r = mscSdCmd(41, v2 ? 0x40000000 : 0);
+        if (millis() > deadline) {
+            mscSPI.endTransaction();
+            return false;
+        }
+    } while (r != 0x00);
+
+    if (v2 && mscSdCmd(58, 0) == 0x00) {
+        uint8_t ocr[4];
+        for (int i = 0; i < 4; i++) ocr[i] = mscSdTransfer(0xFF);
+        mscCardIsHC = (ocr[0] & 0x40) != 0;
+    }
+
+    if (!mscCardIsHC && mscSdCmd(16, MSC_SECTOR_SIZE) != 0x00) {
+        mscSPI.endTransaction();
+        return false;
+    }
+
+    mscSdDeselect();
+    mscSPI.endTransaction();
+    return true;
+}
+
+static bool mscReadSectors(uint8_t* buf, uint32_t lba, uint32_t count) {
+    mscSPI.beginTransaction(SPISettings(20000000, MSBFIRST, SPI_MODE0));
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t addr = mscCardIsHC ? (lba + i) : ((lba + i) * MSC_SECTOR_SIZE);
+
+        mscSdDeselect();
+        mscSdTransfer(0xFF);
+        mscSdSelect();
+        mscSdTransfer(0x40 | 17);
+        mscSdTransfer((addr >> 24) & 0xFF);
+        mscSdTransfer((addr >> 16) & 0xFF);
+        mscSdTransfer((addr >> 8) & 0xFF);
+        mscSdTransfer(addr & 0xFF);
+        mscSdTransfer(0xFF);
+
+        uint8_t r1 = 0xFF;
+        for (int t = 0; t < 10; t++) {
+            r1 = mscSdTransfer(0xFF);
+            if (!(r1 & 0x80)) break;
+        }
+        if (r1 != 0x00) {
+            mscSdDeselect();
+            mscSPI.endTransaction();
+            return false;
+        }
+
+        uint8_t token = 0xFF;
+        uint32_t dl = millis() + 500;
+        while (millis() < dl) {
+            token = mscSdTransfer(0xFF);
+            if (token != 0xFF) break;
+        }
+        if (token != 0xFE) {
+            mscSdDeselect();
+            mscSPI.endTransaction();
+            return false;
+        }
+
+        for (uint32_t b = 0; b < MSC_SECTOR_SIZE; b++) buf[i * MSC_SECTOR_SIZE + b] = mscSdTransfer(0xFF);
+        mscSdTransfer(0xFF);
+        mscSdTransfer(0xFF);
+        mscSdDeselect();
+    }
+    mscSPI.endTransaction();
+    return true;
+}
+
+static bool mscWriteSectors(const uint8_t* buf, uint32_t lba, uint32_t count) {
+    mscSPI.beginTransaction(SPISettings(20000000, MSBFIRST, SPI_MODE0));
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t addr = mscCardIsHC ? (lba + i) : ((lba + i) * MSC_SECTOR_SIZE);
+
+        mscSdDeselect();
+        mscSdTransfer(0xFF);
+        mscSdSelect();
+        mscSdTransfer(0x40 | 24);
+        mscSdTransfer((addr >> 24) & 0xFF);
+        mscSdTransfer((addr >> 16) & 0xFF);
+        mscSdTransfer((addr >> 8) & 0xFF);
+        mscSdTransfer(addr & 0xFF);
+        mscSdTransfer(0xFF);
+
+        uint8_t r1 = 0xFF;
+        for (int t = 0; t < 10; t++) {
+            r1 = mscSdTransfer(0xFF);
+            if (!(r1 & 0x80)) break;
+        }
+        if (r1 != 0x00) {
+            mscSdDeselect();
+            mscSPI.endTransaction();
+            return false;
+        }
+
+        mscSdTransfer(0xFF);
+        mscSdTransfer(0xFE);
+        for (uint32_t b = 0; b < MSC_SECTOR_SIZE; b++) mscSdTransfer(buf[i * MSC_SECTOR_SIZE + b]);
+        mscSdTransfer(0xFF);
+        mscSdTransfer(0xFF);
+
+        uint8_t dresp = mscSdTransfer(0xFF);
+        if ((dresp & 0x1F) != 0x05) {
+            mscSdDeselect();
+            mscSPI.endTransaction();
+            return false;
+        }
+
+        uint32_t dl = millis() + 2000;
+        while (millis() < dl) {
+            if (mscSdTransfer(0xFF) != 0x00) break;
+        }
+        mscSdDeselect();
+    }
+    mscSPI.endTransaction();
+    return true;
+}
+
+static int32_t mscOnRead(uint32_t lba, uint32_t offset, void* buffer, uint32_t bufsize) {
+    (void)offset;
+    uint32_t count = bufsize / MSC_SECTOR_SIZE;
+    if (count == 0) return -1;
+    return mscReadSectors((uint8_t*)buffer, lba, count) ? (int32_t)bufsize : -1;
+}
+
+static int32_t mscOnWrite(uint32_t lba, uint32_t offset, uint8_t* buffer, uint32_t bufsize) {
+    (void)offset;
+    uint32_t count = bufsize / MSC_SECTOR_SIZE;
+    if (count == 0) return -1;
+    return mscWriteSectors(buffer, lba, count) ? (int32_t)bufsize : -1;
+}
+
+static bool mscOnStartStop(uint8_t power_condition, bool start, bool load_eject) {
+    (void)power_condition;
+    (void)start;
+    (void)load_eject;
+    return true;
+}
+
+// Hands the SD card over to the host computer as a USB drive. Returns
+// false (leaving normal calculator operation untouched) if there's no
+// card or the raw protocol handshake fails.
+static bool enterUsbDriveMode() {
+    if (!sdReady || sdSectorCount == 0) return false;
+
+    SD.end(); // release the FAT mount before raw sector access begins
+    delay(20);
+    pinMode(SD_SPI_CS_PIN, OUTPUT);
+    mscSPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
+
+    if (!mscSdRawInit()) return false;
+
+    MSC.vendorID("CalcCard");
+    MSC.productID("Cardputer");
+    MSC.productRevision("1.0");
+    MSC.onRead(mscOnRead);
+    MSC.onWrite(mscOnWrite);
+    MSC.onStartStop(mscOnStartStop);
+    MSC.mediaPresent(true);
+    MSC.begin(sdSectorCount, MSC_SECTOR_SIZE);
+
+    USB.manufacturerName("CardputerCalc");
+    USB.productName("SD Card");
+    USB.begin();
+
+    mscModeActive = true;
+    return true;
+}
 
 struct HistEntry {
     std::string expr;
@@ -101,6 +357,7 @@ static const std::vector<std::vector<std::string>> helpPages = {
     {"Previous results:", "ans = most recent result", "ans(n) = n-th most recent", "ex: ans(1)+ans(2)+ans(3)"},
     {"Saving:", "History auto-saves to flash", "(survives power off, no SD", "card needed).", "Type save + Enter to also", "append it to calc_log.txt", "on a microSD card."},
     {"Clock (no RTC on this", "board, resets each boot):", "settime(H,M,S) sets it", "time shows current H:M:S", "ex: settime(9,30,0)"},
+    {"USB drive mode:", "usbdrive exposes the SD", "card to a computer over", "USB. Needs reset/power-", "cycle to return to the", "calculator afterward."},
     {"Keys:", "fn+BkSp = clear all", "fn+;/.  = history up/down", "fn+,//  = cursor left/right", "opt+D   = deg/rad toggle", "Tab     = complete func name"},
 };
 
@@ -646,6 +903,19 @@ static void evaluate() {
         cursorPos = 0;
         return;
     }
+    if (equalsIgnoreCase(expr, "usbdrive")) {
+        // Only reachable via the calculator UI, which renders its own
+        // screen right up until this call, so haveResult/render() here
+        // don't matter once mscModeActive flips loop()/render() over.
+        if (!enterUsbDriveMode()) {
+            resultLine = "SD ERR (no card?)";
+            expr.clear();
+            haveResult = true;
+        }
+        browseIndex = -1;
+        cursorPos = 0;
+        return;
+    }
     try {
         Parser p(expr, degMode);
         double v = p.run();
@@ -709,7 +979,33 @@ static void cursorRight() {
 static const int LINE_H = 12;   // px per text line at text size 1
 static const int TOP_Y = 16;    // first history line's y (below the title)
 
+static void renderUsbDriveScreen() {
+    canvas.fillSprite(TFT_BLACK);
+    canvas.setTextSize(1);
+    canvas.setTextColor(TFT_GREEN, TFT_BLACK);
+    canvas.setCursor(2, 2);
+    canvas.print("USB Mass Storage");
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    canvas.setCursor(2, TOP_Y);
+    canvas.print("SD card exposed over USB.");
+    canvas.setCursor(2, TOP_Y + LINE_H);
+    canvas.print("Find it as a drive on your");
+    canvas.setCursor(2, TOP_Y + 2 * LINE_H);
+    canvas.print("computer.");
+    canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+    canvas.setCursor(2, TOP_Y + 4 * LINE_H);
+    canvas.print("Reset/power-cycle to return");
+    canvas.setCursor(2, TOP_Y + 5 * LINE_H);
+    canvas.print("to the calculator.");
+    canvas.pushSprite(0, 0);
+}
+
 static void render() {
+    if (mscModeActive) {
+        renderUsbDriveScreen();
+        return;
+    }
+
     int h = canvas.height();
     canvas.fillSprite(TFT_BLACK);
     canvas.setTextSize(1);
@@ -833,7 +1129,7 @@ static void handleBackspace() {
 // Names Tab-completion will offer, i.e. everything applyIdentifier()
 // recognizes plus the "help" command.
 static const std::vector<std::string> FUNCTION_NAMES = {
-    "pi", "e", "ans", "help", "save", "time", "settime",
+    "pi", "e", "ans", "help", "save", "time", "settime", "usbdrive",
     "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
     "tanh", "sinh", "cosh", "asinh", "acosh", "atanh",
     "sqrt", "cbrt", "pow", "exp", "log", "ln", "log2",
@@ -844,7 +1140,7 @@ static const std::vector<std::string> FUNCTION_NAMES = {
 
 // Words that stand alone (no argument list), so Tab shouldn't add "(".
 static bool isBareWord(const std::string& w) {
-    return w == "pi" || w == "e" || w == "ans" || w == "help" || w == "save" || w == "time";
+    return w == "pi" || w == "e" || w == "ans" || w == "help" || w == "save" || w == "time" || w == "usbdrive";
 }
 
 // Tab-completion state: which span of `expr` is being cycled, and which
@@ -920,6 +1216,7 @@ void setup() {
     // just reports an error until a card is present.
     SPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
     sdReady = SD.begin(SD_SPI_CS_PIN, SPI, 25000000);
+    if (sdReady) sdSectorCount = (uint32_t)(SD.totalBytes() / MSC_SECTOR_SIZE);
 
     render();
 }
@@ -929,6 +1226,17 @@ static bool wordHas(const Keyboard_Class::KeysState& s, char c) {
 }
 
 void loop() {
+    if (mscModeActive) {
+        // The SD card now belongs entirely to the raw MSC callbacks;
+        // don't touch the keyboard/SD-via-SD.h from here until reset.
+        static uint32_t lastDraw = 0;
+        if (millis() - lastDraw > 1000) {
+            lastDraw = millis();
+            render();
+        }
+        return;
+    }
+
     M5Cardputer.update();
 
     if (M5Cardputer.Keyboard.isChange()) {
