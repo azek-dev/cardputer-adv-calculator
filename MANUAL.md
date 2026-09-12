@@ -1,5 +1,7 @@
 # Manual
 
+*[日本語版はこちら](MANUAL.ja.md)*
+
 ## Getting started
 
 Type a math expression on the keyboard and press **Enter** to evaluate it:

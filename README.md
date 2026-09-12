@@ -40,8 +40,8 @@ that result (chained, like a normal calculator); typing anything else starts
 a fresh expression. Pressing `Backspace` right after a result re-opens that
 expression for editing instead of clearing it.
 
-See **[MANUAL.md](MANUAL.md)** for a full walkthrough and the complete
-function reference with examples.
+See **[MANUAL.md](MANUAL.md)** (**[日本語版](MANUAL.ja.md)**) for a full
+walkthrough and the complete function reference with examples.
 
 ## Building
 
