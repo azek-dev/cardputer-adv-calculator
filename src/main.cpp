@@ -55,14 +55,17 @@
 // what's saved. Nothing here ever prompts for Wi-Fi automatically — it's
 // entirely opt-in, and boot/typing/calculating is unaffected if unused.
 //
-// The calculator deep-sleeps after 10 minutes with no key press (this
-// board has no PMIC for a true power-off, so deep sleep is the closest
-// equivalent — a few tens of µA instead of a full shutdown). Wake it up
-// with the physical G0/BtnA side button (not a keyboard key — the whole
-// keyboard is powered down during sleep). "sleeptime(n)" changes the
-// timeout to n minutes (0 disables auto-sleep); bare "sleeptime" shows
-// the current setting. The setting is saved to flash and persists across
-// power cycles.
+// The calculator deep-sleeps after 10 minutes with no key press, or
+// immediately if the physical G0/BtnA button (on top of the device) is
+// pressed at any time — this board has no PMIC for a true power-off, so
+// deep sleep is the closest equivalent (a few tens of µA instead of a
+// full shutdown). The same G0/BtnA button also wakes it back up (not a
+// keyboard key — the whole keyboard is powered down during sleep); if
+// Wi-Fi credentials are saved, waking this way also silently retries an
+// NTP time sync (a plain power-on never does this on its own). "sleeptime(n)"
+// changes the idle timeout to n minutes (0 disables it); bare "sleeptime"
+// shows the current setting. The setting is saved to flash and persists
+// across power cycles.
 //
 // Type "usbdrive" and press Enter to expose the microSD card to a computer
 // over the same USB-C cable, as an ordinary USB drive — no card removal
@@ -431,7 +434,7 @@ static const std::vector<std::vector<std::string>> helpPages = {
     {"Saving:", "History auto-saves to flash", "(survives power off, no SD", "card needed).", "Type save + Enter to also", "append it to calc_log.txt", "on a microSD card."},
     {"Clock (no RTC on this", "board, resets each boot):", "timeset(H,M,S) sets it", "time shows current H:M:S", "ex: timeset(9,30,0)"},
     {"USB drive mode:", "usbdrive exposes the SD", "card to a computer over", "USB. Needs reset/power-", "cycle to return to the", "calculator afterward.", "usbdebug shows why it", "failed, after a reset."},
-    {"Auto-sleep (no PMIC, so", "this is deep sleep, not a", "real power-off):", "sleeptime(n) sets n min", "sleeptime shows current", "Wake: press G0/BtnA side", "button (not a keyboard key)"},
+    {"Auto-sleep (no PMIC, so", "this is deep sleep, not a", "real power-off):", "sleeptime(n) sets n min", "sleeptime shows current", "G0/BtnA (top button) also", "sleeps/wakes on demand;", "wake retries saved wifi"},
     {"Wifi time sync (opt-in,", "never asked automatically):", "wifi(ssid,pass) saves +", "syncs via NTP (JST)", "wifi() retries saved creds", "wifi shows saved SSID"},
     {"Keys:", "fn+BkSp = clear all", "fn+;/.  = history up/down", "fn+,//  = cursor left/right", "opt+D   = deg/rad toggle", "Tab     = complete func name"},
 };
@@ -1480,6 +1483,20 @@ void setup() {
     sdReady = SD.begin(SD_SPI_CS_PIN, SPI, 25000000);
     if (sdReady) sdSectorCount = (uint32_t)(SD.totalBytes() / MSC_SECTOR_SIZE);
 
+    pinMode(WAKE_BUTTON_PIN, INPUT_PULLUP); // also read as a plain button below, not just as a sleep wake source
+
+    // Only right after waking from deep sleep via the G0 button — never on
+    // a plain power-on — silently retry a saved Wi-Fi sync, since that's
+    // exactly when the software clock has just been wiped.
+    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0 && !wifiSsid.empty()) {
+        canvas.fillSprite(TFT_BLACK);
+        canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+        canvas.setCursor(2, 2);
+        canvas.print("Syncing time via Wi-Fi...");
+        canvas.pushSprite(0, 0);
+        ntpSyncViaWifi(wifiSsid, wifiPass); // best-effort; failure just leaves the clock unset
+    }
+
     render();
 }
 
@@ -1501,6 +1518,15 @@ void loop() {
     if (idleSleepMinutes > 0 && millis() - lastActivityMillis > idleSleepMinutes * 60000UL) {
         enterDeepSleep(); // never returns
     }
+
+    // G0/BtnA also works as an immediate manual sleep button, not just as
+    // the wake source: press it any time to skip the idle timeout.
+    static bool g0PrevHigh = true;
+    bool g0Now = digitalRead(WAKE_BUTTON_PIN) == LOW;
+    if (g0Now && g0PrevHigh) {
+        enterDeepSleep(); // never returns
+    }
+    g0PrevHigh = !g0Now;
 
     M5Cardputer.update();
 
