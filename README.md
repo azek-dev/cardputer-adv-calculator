@@ -26,7 +26,7 @@ on the built-in QWERTY keyboard and evaluate them with Enter — like
   power-off, no SD card required
 - Type `save` and press Enter to also export the current history as plain
   text to `calc_log.txt` on a microSD card
-- `settime(H,M,S)` / `time` — a simple software clock (no RTC chip on this
+- `timeset(H,M,S)` / `time` — a simple software clock (no RTC chip on this
   hardware), timestamps `save` entries; resets on power-cycle
 - `wifi(ssid,pass)` — optional, opt-in: saves credentials to flash and
   syncs the clock via NTP (JST) immediately. `wifi()` retries with saved

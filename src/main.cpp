@@ -45,9 +45,9 @@
 // to /calc_log.txt on a microSD card, as plain text you can read on a PC.
 //
 // There's no RTC chip on this hardware, so there's no real clock unless
-// you set one. "settime(H,M,S)" sets a reference time by hand (from
+// you set one. "timeset(H,M,S)" sets a reference time by hand (from
 // millis() elapsed since); "time" shows the current computed time. This
-// resets on every power-cycle — re-run settime() after each boot.
+// resets on every power-cycle — re-run timeset() after each boot.
 //
 // Alternatively, "wifi(ssid,pass)" saves Wi-Fi credentials to flash and
 // immediately syncs the clock via NTP (hardcoded to JST); "wifi()" retries
@@ -429,7 +429,7 @@ static const std::vector<std::vector<std::string>> helpPages = {
     {"Rounding & misc:", "abs floor ceil round int", "pi  e  x!  ^  %", "ex: int(rand(1,11)) = 1..10"},
     {"Previous results:", "ans = most recent result", "ans(n) = n-th most recent", "ex: ans(1)+ans(2)+ans(3)"},
     {"Saving:", "History auto-saves to flash", "(survives power off, no SD", "card needed).", "Type save + Enter to also", "append it to calc_log.txt", "on a microSD card."},
-    {"Clock (no RTC on this", "board, resets each boot):", "settime(H,M,S) sets it", "time shows current H:M:S", "ex: settime(9,30,0)"},
+    {"Clock (no RTC on this", "board, resets each boot):", "timeset(H,M,S) sets it", "time shows current H:M:S", "ex: timeset(9,30,0)"},
     {"USB drive mode:", "usbdrive exposes the SD", "card to a computer over", "USB. Needs reset/power-", "cycle to return to the", "calculator afterward.", "usbdebug shows why it", "failed, after a reset."},
     {"Auto-sleep (no PMIC, so", "this is deep sleep, not a", "real power-off):", "sleeptime(n) sets n min", "sleeptime shows current", "Wake: press G0/BtnA side", "button (not a keyboard key)"},
     {"Wifi time sync (opt-in,", "never asked automatically):", "wifi(ssid,pass) saves +", "syncs via NTP (JST)", "wifi() retries saved creds", "wifi shows saved SSID"},
@@ -824,7 +824,7 @@ static bool startsWithIgnoreCase(const std::string& a, const char* prefix) {
 
 // ---------------------------------------------------------------------
 // Software clock: this hardware has no RTC chip, so there's no time
-// source unless the user sets one — either manually (settime()) or, if
+// source unless the user sets one — either manually (timeset()) or, if
 // Wi-Fi credentials have been saved (wifi()), via NTP. Either way it just
 // anchors a wall-clock time to the current millis(); currentTimeSeconds()
 // projects it forward. Resets to "unset" on every power-cycle (Wi-Fi
@@ -879,8 +879,8 @@ static bool ntpSyncViaWifi(const std::string& ssid, const std::string& pass) {
     return synced;
 }
 
-// Parses "settime(H,M,S)" (the part in parens) into three integers.
-static bool parseSettimeArgs(const std::string& s, int& h, int& m, int& sec) {
+// Parses "timeset(H,M,S)" (the part in parens) into three integers.
+static bool parseTimesetArgs(const std::string& s, int& h, int& m, int& sec) {
     size_t open = s.find('(');
     size_t close = s.rfind(')');
     if (open == std::string::npos || close == std::string::npos || close <= open) return false;
@@ -1033,22 +1033,22 @@ static void evaluate() {
         return;
     }
     if (equalsIgnoreCase(expr, "time")) {
-        resultLine = timeSet ? formatHMS(currentTimeSeconds()) : "Time not set (settime(H,M,S))";
+        resultLine = timeSet ? formatHMS(currentTimeSeconds()) : "Time not set (timeset(H,M,S))";
         expr.clear();
         haveResult = true;
         browseIndex = -1;
         cursorPos = 0;
         return;
     }
-    if (startsWithIgnoreCase(expr, "settime(") && !expr.empty() && expr.back() == ')') {
+    if (startsWithIgnoreCase(expr, "timeset(") && !expr.empty() && expr.back() == ')') {
         int h, m, s;
-        if (parseSettimeArgs(expr, h, m, s) && h >= 0 && h < 24 && m >= 0 && m < 60 && s >= 0 && s < 60) {
+        if (parseTimesetArgs(expr, h, m, s) && h >= 0 && h < 24 && m >= 0 && m < 60 && s >= 0 && s < 60) {
             timeBaseSeconds = h * 3600 + m * 60 + s;
             timeBaseMillis = millis();
             timeSet = true;
             resultLine = "Time set to " + formatHMS(timeBaseSeconds);
         } else {
-            resultLine = "ERR: settime(H,M,S) 0-23,0-59,0-59";
+            resultLine = "ERR: timeset(H,M,S) 0-23,0-59,0-59";
         }
         expr.clear();
         haveResult = true;
@@ -1386,7 +1386,7 @@ static void handleBackspace() {
 // Names Tab-completion will offer, i.e. everything applyIdentifier()
 // recognizes plus the "help" command.
 static const std::vector<std::string> FUNCTION_NAMES = {
-    "pi", "e", "ans", "help", "save", "time", "settime", "usbdrive", "usbdebug", "sleeptime", "wifi",
+    "pi", "e", "ans", "help", "save", "time", "timeset", "usbdrive", "usbdebug", "sleeptime", "wifi",
     "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
     "tanh", "sinh", "cosh", "asinh", "acosh", "atanh",
     "sqrt", "cbrt", "pow", "exp", "log", "ln", "log2",
