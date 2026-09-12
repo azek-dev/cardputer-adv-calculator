@@ -32,6 +32,10 @@ on the built-in QWERTY keyboard and evaluate them with Enter — like
   ordinary drive, no card removal needed (requires a reset to return to
   the calculator afterward); `usbdebug` shows the last low-level SD
   error if it fails on a particular card
+- Auto-sleep after 10 minutes idle (no PMIC on this board, so this is
+  deep sleep rather than a true power-off); wake with the physical
+  G0/BtnA side button. `sleeptime(n)` changes the timeout in minutes
+  (0 disables it); bare `sleeptime` shows the current setting
 
 ## Keys
 

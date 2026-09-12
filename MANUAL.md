@@ -144,6 +144,22 @@ computer, reset the calculator and type `usbdebug` to see the last
 low-level SD error that was recorded during the attempt (useful if you run
 into this with a particular card).
 
+## Auto-sleep
+
+The Cardputer/Cardputer ADV has no power management chip capable of a true
+power-off, so the closest available thing is deep sleep — a few tens of
+microamps instead of a full shutdown. By default, the calculator goes to
+sleep after **10 minutes** with no key press.
+
+- `sleeptime(n)` — set the idle timeout to `n` minutes (0 disables
+  auto-sleep entirely). Saved to flash, so it persists across power cycles.
+- `sleeptime` (no parens) — show the current timeout.
+
+**Waking up:** press the physical **G0/BtnA button on the side** of the
+device — not a keyboard key. The entire keyboard matrix is unpowered
+during sleep, so no ordinary key press can wake it. History and settings
+are saved to flash right before sleeping, same as normal.
+
 ## Function reference
 
 Trig functions respect the DEG/RAD toggle above.

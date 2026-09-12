@@ -49,6 +49,15 @@
 // (from millis() elapsed since); "time" shows the current computed time.
 // This resets on every power-cycle — re-run settime() after each boot.
 //
+// The calculator deep-sleeps after 10 minutes with no key press (this
+// board has no PMIC for a true power-off, so deep sleep is the closest
+// equivalent — a few tens of µA instead of a full shutdown). Wake it up
+// with the physical G0/BtnA side button (not a keyboard key — the whole
+// keyboard is powered down during sleep). "sleeptime(n)" changes the
+// timeout to n minutes (0 disables auto-sleep); bare "sleeptime" shows
+// the current setting. The setting is saved to flash and persists across
+// power cycles.
+//
 // Type "usbdrive" and press Enter to expose the microSD card to a computer
 // over the same USB-C cable, as an ordinary USB drive — no card removal
 // needed. This takes over the SD card and the USB port for that purpose;
@@ -68,6 +77,7 @@
 #include <SD.h>
 #include <USB.h>
 #include <USBMSC.h>
+#include <esp_sleep.h>
 #include <cmath>
 #include <vector>
 #include <string>
@@ -75,6 +85,8 @@
 #include <utility>
 
 static M5Canvas canvas(&M5Cardputer.Display);
+static const int LINE_H = 12;   // px per text line at text size 1
+static const int TOP_Y = 16;    // first history line's y (below the title)
 
 // microSD wiring on both Cardputer and Cardputer ADV (per M5Stack's
 // official examples) — SPI bus is not shared with anything else.
@@ -412,6 +424,7 @@ static const std::vector<std::vector<std::string>> helpPages = {
     {"Saving:", "History auto-saves to flash", "(survives power off, no SD", "card needed).", "Type save + Enter to also", "append it to calc_log.txt", "on a microSD card."},
     {"Clock (no RTC on this", "board, resets each boot):", "settime(H,M,S) sets it", "time shows current H:M:S", "ex: settime(9,30,0)"},
     {"USB drive mode:", "usbdrive exposes the SD", "card to a computer over", "USB. Needs reset/power-", "cycle to return to the", "calculator afterward.", "usbdebug shows why it", "failed, after a reset."},
+    {"Auto-sleep (no PMIC, so", "this is deep sleep, not a", "real power-off):", "sleeptime(n) sets n min", "sleeptime shows current", "Wake: press G0/BtnA side", "button (not a keyboard key)"},
     {"Keys:", "fn+BkSp = clear all", "fn+;/.  = history up/down", "fn+,//  = cursor left/right", "opt+D   = deg/rad toggle", "Tab     = complete func name"},
 };
 
@@ -422,6 +435,12 @@ static const size_t HISTORY_STORE_CAP = 20;
 // How many of the most recent entries fit on screen at once; computed at
 // startup in setup() from the actual display size (see historyDisplayCap).
 static size_t historyDisplayCap = 4;
+
+// Deep-sleep-on-idle. 0 = disabled. Loaded from / saved to flash so the
+// setting survives a power cycle.
+static uint32_t idleSleepMinutes = 10;
+static uint32_t lastActivityMillis = 0;
+static const int WAKE_BUTTON_PIN = 0; // G0 / BtnA, the side button
 
 // ---------------------------------------------------------------------
 // Recursive-descent expression parser / evaluator
@@ -857,6 +876,7 @@ static bool parseSettimeArgs(const std::string& s, int& h, int& m, int& sec) {
 static void saveStateToFlash() {
     prefs.begin(PREFS_NS, false);
     prefs.putBool("deg", degMode);
+    prefs.putUInt("sleepmin", idleSleepMinutes);
     prefs.putUInt("hn", (uint32_t)history.size());
     for (size_t i = 0; i < history.size(); i++) {
         char key[12];
@@ -873,6 +893,7 @@ static void saveStateToFlash() {
 static void loadStateFromFlash() {
     prefs.begin(PREFS_NS, true);
     degMode = prefs.getBool("deg", false);
+    idleSleepMinutes = prefs.getUInt("sleepmin", 10);
     uint32_t n = prefs.getUInt("hn", 0);
     history.clear();
     for (uint32_t i = 0; i < n && i < HISTORY_STORE_CAP; i++) {
@@ -887,6 +908,32 @@ static void loadStateFromFlash() {
         history.push_back(he);
     }
     prefs.end();
+}
+
+// No PMIC on this board (see the file header), so deep sleep is the
+// closest available thing to "power off". Only the physical G0/BtnA side
+// button can wake it — the keyboard matrix itself is unpowered during
+// sleep, so no ordinary key works. Never returns.
+static void enterDeepSleep() {
+    saveStateToFlash();
+
+    canvas.fillSprite(TFT_BLACK);
+    canvas.setTextSize(1);
+    canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+    canvas.setCursor(2, 2);
+    canvas.print("Sleeping (idle timeout)");
+    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+    canvas.setCursor(2, TOP_Y);
+    canvas.print("Press the G0/BtnA side");
+    canvas.setCursor(2, TOP_Y + LINE_H);
+    canvas.print("button to wake up.");
+    canvas.pushSprite(0, 0);
+    delay(800); // let the message actually reach the screen before dimming
+    M5Cardputer.Display.setBrightness(0);
+
+    pinMode(WAKE_BUTTON_PIN, INPUT_PULLUP);
+    esp_sleep_enable_ext0_wakeup((gpio_num_t)WAKE_BUTTON_PIN, 0); // wake on LOW
+    esp_deep_sleep_start();
 }
 
 // Appends the current in-memory history to /calc_log.txt on the SD card
@@ -994,6 +1041,48 @@ static void evaluate() {
         cursorPos = 0;
         return;
     }
+    if (equalsIgnoreCase(expr, "sleeptime")) {
+        char buf[48];
+        if (idleSleepMinutes == 0) snprintf(buf, sizeof(buf), "auto-sleep disabled");
+        else snprintf(buf, sizeof(buf), "auto-sleep after %lu min", (unsigned long)idleSleepMinutes);
+        resultLine = buf;
+        expr.clear();
+        haveResult = true;
+        browseIndex = -1;
+        cursorPos = 0;
+        return;
+    }
+    if (startsWithIgnoreCase(expr, "sleeptime(") && !expr.empty() && expr.back() == ')') {
+        size_t open = expr.find('(');
+        size_t close = expr.rfind(')');
+        std::string inner = (open != std::string::npos && close != std::string::npos && close > open)
+                                 ? expr.substr(open + 1, close - open - 1)
+                                 : "";
+        size_t a = inner.find_first_not_of(' ');
+        bool valid = a != std::string::npos;
+        if (valid) {
+            size_t b = inner.find_last_not_of(' ');
+            inner = inner.substr(a, b - a + 1);
+        }
+        for (char c : inner)
+            if (!std::isdigit((unsigned char)c)) valid = false;
+        long n = valid && !inner.empty() ? atol(inner.c_str()) : -1;
+        if (valid && n >= 0 && n <= 1440) {
+            idleSleepMinutes = (uint32_t)n;
+            saveStateToFlash();
+            char buf[48];
+            if (idleSleepMinutes == 0) snprintf(buf, sizeof(buf), "auto-sleep disabled");
+            else snprintf(buf, sizeof(buf), "auto-sleep after %lu min", (unsigned long)idleSleepMinutes);
+            resultLine = buf;
+        } else {
+            resultLine = "ERR: sleeptime(0-1440)";
+        }
+        expr.clear();
+        haveResult = true;
+        browseIndex = -1;
+        cursorPos = 0;
+        return;
+    }
     try {
         Parser p(expr, degMode);
         double v = p.run();
@@ -1054,9 +1143,6 @@ static void cursorRight() {
 // ---------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------
-static const int LINE_H = 12;   // px per text line at text size 1
-static const int TOP_Y = 16;    // first history line's y (below the title)
-
 static void renderUsbDriveScreen() {
     canvas.fillSprite(TFT_BLACK);
     canvas.setTextSize(1);
@@ -1207,7 +1293,7 @@ static void handleBackspace() {
 // Names Tab-completion will offer, i.e. everything applyIdentifier()
 // recognizes plus the "help" command.
 static const std::vector<std::string> FUNCTION_NAMES = {
-    "pi", "e", "ans", "help", "save", "time", "settime", "usbdrive", "usbdebug",
+    "pi", "e", "ans", "help", "save", "time", "settime", "usbdrive", "usbdebug", "sleeptime",
     "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
     "tanh", "sinh", "cosh", "asinh", "acosh", "atanh",
     "sqrt", "cbrt", "pow", "exp", "log", "ln", "log2",
@@ -1219,7 +1305,7 @@ static const std::vector<std::string> FUNCTION_NAMES = {
 // Words that stand alone (no argument list), so Tab shouldn't add "(".
 static bool isBareWord(const std::string& w) {
     return w == "pi" || w == "e" || w == "ans" || w == "help" || w == "save" || w == "time" || w == "usbdrive" ||
-           w == "usbdebug";
+           w == "usbdebug" || w == "sleeptime";
 }
 
 // Tab-completion state: which span of `expr` is being cycled, and which
@@ -1291,6 +1377,7 @@ void setup() {
     if (historyDisplayCap < 1) historyDisplayCap = 1;
 
     loadStateFromFlash(); // restore history + DEG/RAD from before power-off
+    lastActivityMillis = millis();
 
     // SD card is optional: the calculator works fine without one, "save"
     // just reports an error until a card is present.
@@ -1316,10 +1403,15 @@ void loop() {
         return;
     }
 
+    if (idleSleepMinutes > 0 && millis() - lastActivityMillis > idleSleepMinutes * 60000UL) {
+        enterDeepSleep(); // never returns
+    }
+
     M5Cardputer.update();
 
     if (M5Cardputer.Keyboard.isChange()) {
         if (M5Cardputer.Keyboard.isPressed()) {
+            lastActivityMillis = millis();
             Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
 
             // This library's `fn`/`opt` are plain modifier flags: holding
