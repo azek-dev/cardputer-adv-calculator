@@ -109,6 +109,22 @@ Read the file on a computer with any microSD card reader. If no card is
 present (or it fails to initialize), the calculator shows `SD ERR` instead
 of a result and continues working normally otherwise.
 
+## Setting the time
+
+This hardware has no RTC chip, and this sketch has no Wi-Fi/NTP, so there's
+no clock unless you set one:
+
+- `settime(H,M,S)` — set the current time (24-hour, e.g. `settime(9,30,0)`
+  for 9:30:00 AM). This anchors a wall-clock time to the calculator's
+  internal uptime timer.
+- `time` — show the current time, computed from that anchor plus elapsed
+  time since it was set.
+
+The clock resets to "unset" every time the calculator loses power — there's
+no battery-backed clock to carry it forward, so run `settime` again after
+each boot if you want timestamps. Once set, `save` entries are stamped with
+the time they were written, e.g. `---- save #2 (4 entries, RAD) @ 09:47:12 ----`.
+
 ## Function reference
 
 Trig functions respect the DEG/RAD toggle above.

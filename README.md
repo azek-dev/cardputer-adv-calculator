@@ -26,6 +26,8 @@ on the built-in QWERTY keyboard and evaluate them with Enter — like
   power-off, no SD card required
 - Type `save` and press Enter to also export the current history as plain
   text to `calc_log.txt` on a microSD card
+- `settime(H,M,S)` / `time` — a simple software clock (no RTC chip on this
+  hardware), timestamps `save` entries; resets on power-cycle
 
 ## Keys
 

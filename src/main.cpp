@@ -43,6 +43,11 @@
 //
 // Type "save" and press Enter to additionally append the current history
 // to /calc_log.txt on a microSD card, as plain text you can read on a PC.
+//
+// There's no RTC chip on this hardware and no Wi-Fi/NTP in this sketch, so
+// there's no real clock by default. "settime(H,M,S)" sets a reference time
+// (from millis() elapsed since); "time" shows the current computed time.
+// This resets on every power-cycle — re-run settime() after each boot.
 
 #include <M5Cardputer.h>
 #include <M5GFX.h>
@@ -95,6 +100,7 @@ static const std::vector<std::vector<std::string>> helpPages = {
     {"Rounding & misc:", "abs floor ceil round int", "pi  e  x!  ^  %", "ex: int(rand(1,11)) = 1..10"},
     {"Previous results:", "ans = most recent result", "ans(n) = n-th most recent", "ex: ans(1)+ans(2)+ans(3)"},
     {"Saving:", "History auto-saves to flash", "(survives power off, no SD", "card needed).", "Type save + Enter to also", "append it to calc_log.txt", "on a microSD card."},
+    {"Clock (no RTC on this", "board, resets each boot):", "settime(H,M,S) sets it", "time shows current H:M:S", "ex: settime(9,30,0)"},
     {"Keys:", "fn+BkSp = clear all", "fn+;/.  = history up/down", "fn+,//  = cursor left/right", "opt+D   = deg/rad toggle", "Tab     = complete func name"},
 };
 
@@ -469,6 +475,70 @@ static bool equalsIgnoreCase(const std::string& a, const char* b) {
     return i == a.size() && b[i] == '\0';
 }
 
+static bool startsWithIgnoreCase(const std::string& a, const char* prefix) {
+    size_t i = 0;
+    for (; prefix[i]; i++) {
+        if (i >= a.size() || std::tolower((unsigned char)a[i]) != std::tolower((unsigned char)prefix[i]))
+            return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------
+// Software clock: this hardware has no RTC chip and this sketch has no
+// Wi-Fi/NTP, so there's no time source unless the user sets one. settime()
+// anchors a wall-clock time to the current millis(); currentTimeSeconds()
+// projects it forward. Resets to "unset" on every power-cycle.
+// ---------------------------------------------------------------------
+static bool timeSet = false;
+static uint32_t timeBaseMillis = 0;
+static int32_t timeBaseSeconds = 0;
+
+static int32_t currentTimeSeconds() {
+    uint32_t elapsedMs = millis() - timeBaseMillis; // unsigned wraparound-safe
+    int32_t total = (timeBaseSeconds + (int32_t)(elapsedMs / 1000)) % 86400;
+    if (total < 0) total += 86400;
+    return total;
+}
+
+static std::string formatHMS(int32_t totalSeconds) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%02d:%02d:%02d", (int)(totalSeconds / 3600),
+             (int)((totalSeconds % 3600) / 60), (int)(totalSeconds % 60));
+    return std::string(buf);
+}
+
+// Parses "settime(H,M,S)" (the part in parens) into three integers.
+static bool parseSettimeArgs(const std::string& s, int& h, int& m, int& sec) {
+    size_t open = s.find('(');
+    size_t close = s.rfind(')');
+    if (open == std::string::npos || close == std::string::npos || close <= open) return false;
+    std::string inner = s.substr(open + 1, close - open - 1);
+
+    int vals[3];
+    int count = 0;
+    size_t pos = 0;
+    while (count < 3) {
+        size_t comma = inner.find(',', pos);
+        std::string tok = (comma == std::string::npos) ? inner.substr(pos) : inner.substr(pos, comma - pos);
+        size_t a = tok.find_first_not_of(' ');
+        size_t b = tok.find_last_not_of(' ');
+        if (a == std::string::npos) return false;
+        tok = tok.substr(a, b - a + 1);
+        if (tok.empty()) return false;
+        for (char c : tok)
+            if (!std::isdigit((unsigned char)c)) return false;
+        vals[count++] = atoi(tok.c_str());
+        if (comma == std::string::npos) break;
+        pos = comma + 1;
+    }
+    if (count != 3) return false;
+    h = vals[0];
+    m = vals[1];
+    sec = vals[2];
+    return true;
+}
+
 // ---------------------------------------------------------------------
 // Persistence: history + settings auto-saved to internal flash (NVS),
 // and an explicit text export to a microSD card.
@@ -520,8 +590,9 @@ static bool saveHistoryToSD() {
     prefs.putUInt("savenum", saveNum);
     prefs.end();
 
-    f.printf("---- save #%u (%u entries, %s) ----\n", (unsigned)saveNum,
-              (unsigned)history.size(), degMode ? "DEG" : "RAD");
+    std::string tsSuffix = timeSet ? (" @ " + formatHMS(currentTimeSeconds())) : std::string("");
+    f.printf("---- save #%u (%u entries, %s)%s ----\n", (unsigned)saveNum,
+              (unsigned)history.size(), degMode ? "DEG" : "RAD", tsSuffix.c_str());
     for (auto& h : history) {
         f.printf("%s = %s\n", h.expr.c_str(), h.result.c_str());
     }
@@ -545,6 +616,30 @@ static void evaluate() {
     if (equalsIgnoreCase(expr, "save")) {
         bool ok = saveHistoryToSD();
         resultLine = ok ? ("Saved to " + std::string(SD_LOG_PATH)) : "SD ERR (no card?)";
+        expr.clear();
+        haveResult = true;
+        browseIndex = -1;
+        cursorPos = 0;
+        return;
+    }
+    if (equalsIgnoreCase(expr, "time")) {
+        resultLine = timeSet ? formatHMS(currentTimeSeconds()) : "Time not set (settime(H,M,S))";
+        expr.clear();
+        haveResult = true;
+        browseIndex = -1;
+        cursorPos = 0;
+        return;
+    }
+    if (startsWithIgnoreCase(expr, "settime(") && !expr.empty() && expr.back() == ')') {
+        int h, m, s;
+        if (parseSettimeArgs(expr, h, m, s) && h >= 0 && h < 24 && m >= 0 && m < 60 && s >= 0 && s < 60) {
+            timeBaseSeconds = h * 3600 + m * 60 + s;
+            timeBaseMillis = millis();
+            timeSet = true;
+            resultLine = "Time set to " + formatHMS(timeBaseSeconds);
+        } else {
+            resultLine = "ERR: settime(H,M,S) 0-23,0-59,0-59";
+        }
         expr.clear();
         haveResult = true;
         browseIndex = -1;
@@ -738,7 +833,7 @@ static void handleBackspace() {
 // Names Tab-completion will offer, i.e. everything applyIdentifier()
 // recognizes plus the "help" command.
 static const std::vector<std::string> FUNCTION_NAMES = {
-    "pi", "e", "ans", "help", "save",
+    "pi", "e", "ans", "help", "save", "time", "settime",
     "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
     "tanh", "sinh", "cosh", "asinh", "acosh", "atanh",
     "sqrt", "cbrt", "pow", "exp", "log", "ln", "log2",
@@ -749,7 +844,7 @@ static const std::vector<std::string> FUNCTION_NAMES = {
 
 // Words that stand alone (no argument list), so Tab shouldn't add "(".
 static bool isBareWord(const std::string& w) {
-    return w == "pi" || w == "e" || w == "ans" || w == "help" || w == "save";
+    return w == "pi" || w == "e" || w == "ans" || w == "help" || w == "save" || w == "time";
 }
 
 // Tab-completion state: which span of `expr` is being cycled, and which
