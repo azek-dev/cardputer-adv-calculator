@@ -155,10 +155,32 @@ sleep after **10 minutes** with no key press.
   auto-sleep entirely). Saved to flash, so it persists across power cycles.
 - `sleeptime` (no parens) — show the current timeout.
 
-**Waking up:** press the physical **G0/BtnA button on the side** of the
-device — not a keyboard key. The entire keyboard matrix is unpowered
-during sleep, so no ordinary key press can wake it. History and settings
-are saved to flash right before sleeping, same as normal.
+**Waking up:** press the physical **G0/BtnA button on top** of the device
+— not a keyboard key. It doesn't look like a push-button switch, so it's
+easy to miss if you don't know it's there. The entire keyboard matrix is
+unpowered during sleep, so no ordinary key press can wake it. History and
+settings are saved to flash right before sleeping, same as normal.
+
+## Setting the time via Wi-Fi
+
+If you'd rather not type `settime` by hand every boot, `wifi(ssid,pass)`
+can fetch the real time over NTP instead — entirely optional, and it never
+asks for Wi-Fi on its own.
+
+- `wifi(ssid,pass)` — saves the credentials to flash and immediately tries
+  to connect and sync the clock via NTP (hardcoded to JST / UTC+9). Only
+  letters, digits, spaces, hyphens, and underscores can be typed into an
+  SSID or password on this keyboard.
+- `wifi()` — retries using whatever credentials are already saved (e.g.
+  after a reboot, since the clock itself doesn't survive a power cycle but
+  the saved Wi-Fi credentials do).
+- `wifi` (no parens) — shows the saved SSID, with no side effects.
+
+If the connection or NTP sync fails, the calculator reports it and leaves
+the clock exactly as it was — nothing breaks, and it's no different from
+not having used `wifi` at all. A connect attempt can take up to ~15
+seconds and Wi-Fi is switched off again immediately afterward either way,
+so it never lingers on in the background.
 
 ## Function reference
 

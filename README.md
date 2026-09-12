@@ -28,6 +28,10 @@ on the built-in QWERTY keyboard and evaluate them with Enter — like
   text to `calc_log.txt` on a microSD card
 - `settime(H,M,S)` / `time` — a simple software clock (no RTC chip on this
   hardware), timestamps `save` entries; resets on power-cycle
+- `wifi(ssid,pass)` — optional, opt-in: saves credentials to flash and
+  syncs the clock via NTP (JST) immediately. `wifi()` retries with saved
+  credentials; bare `wifi` shows what's saved. Never prompts on its own —
+  boot and normal use are unaffected unless you use this
 - `usbdrive` — expose the microSD card to a computer over USB as an
   ordinary drive, no card removal needed (requires a reset to return to
   the calculator afterward); `usbdebug` shows the last low-level SD

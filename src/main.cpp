@@ -44,10 +44,16 @@
 // Type "save" and press Enter to additionally append the current history
 // to /calc_log.txt on a microSD card, as plain text you can read on a PC.
 //
-// There's no RTC chip on this hardware and no Wi-Fi/NTP in this sketch, so
-// there's no real clock by default. "settime(H,M,S)" sets a reference time
-// (from millis() elapsed since); "time" shows the current computed time.
-// This resets on every power-cycle — re-run settime() after each boot.
+// There's no RTC chip on this hardware, so there's no real clock unless
+// you set one. "settime(H,M,S)" sets a reference time by hand (from
+// millis() elapsed since); "time" shows the current computed time. This
+// resets on every power-cycle — re-run settime() after each boot.
+//
+// Alternatively, "wifi(ssid,pass)" saves Wi-Fi credentials to flash and
+// immediately syncs the clock via NTP (hardcoded to JST); "wifi()" retries
+// with the saved credentials (e.g. after a reboot); bare "wifi" just shows
+// what's saved. Nothing here ever prompts for Wi-Fi automatically — it's
+// entirely opt-in, and boot/typing/calculating is unaffected if unused.
 //
 // The calculator deep-sleeps after 10 minutes with no key press (this
 // board has no PMIC for a true power-off, so deep sleep is the closest
@@ -78,6 +84,7 @@
 #include <USB.h>
 #include <USBMSC.h>
 #include <esp_sleep.h>
+#include <WiFi.h>
 #include <cmath>
 #include <vector>
 #include <string>
@@ -425,6 +432,7 @@ static const std::vector<std::vector<std::string>> helpPages = {
     {"Clock (no RTC on this", "board, resets each boot):", "settime(H,M,S) sets it", "time shows current H:M:S", "ex: settime(9,30,0)"},
     {"USB drive mode:", "usbdrive exposes the SD", "card to a computer over", "USB. Needs reset/power-", "cycle to return to the", "calculator afterward.", "usbdebug shows why it", "failed, after a reset."},
     {"Auto-sleep (no PMIC, so", "this is deep sleep, not a", "real power-off):", "sleeptime(n) sets n min", "sleeptime shows current", "Wake: press G0/BtnA side", "button (not a keyboard key)"},
+    {"Wifi time sync (opt-in,", "never asked automatically):", "wifi(ssid,pass) saves +", "syncs via NTP (JST)", "wifi() retries saved creds", "wifi shows saved SSID"},
     {"Keys:", "fn+BkSp = clear all", "fn+;/.  = history up/down", "fn+,//  = cursor left/right", "opt+D   = deg/rad toggle", "Tab     = complete func name"},
 };
 
@@ -815,14 +823,18 @@ static bool startsWithIgnoreCase(const std::string& a, const char* prefix) {
 }
 
 // ---------------------------------------------------------------------
-// Software clock: this hardware has no RTC chip and this sketch has no
-// Wi-Fi/NTP, so there's no time source unless the user sets one. settime()
+// Software clock: this hardware has no RTC chip, so there's no time
+// source unless the user sets one — either manually (settime()) or, if
+// Wi-Fi credentials have been saved (wifi()), via NTP. Either way it just
 // anchors a wall-clock time to the current millis(); currentTimeSeconds()
-// projects it forward. Resets to "unset" on every power-cycle.
+// projects it forward. Resets to "unset" on every power-cycle (Wi-Fi
+// credentials themselves persist in flash; the clock does not).
 // ---------------------------------------------------------------------
 static bool timeSet = false;
 static uint32_t timeBaseMillis = 0;
 static int32_t timeBaseSeconds = 0;
+static std::string wifiSsid;
+static std::string wifiPass;
 
 static int32_t currentTimeSeconds() {
     uint32_t elapsedMs = millis() - timeBaseMillis; // unsigned wraparound-safe
@@ -836,6 +848,35 @@ static std::string formatHMS(int32_t totalSeconds) {
     snprintf(buf, sizeof(buf), "%02d:%02d:%02d", (int)(totalSeconds / 3600),
              (int)((totalSeconds % 3600) / 60), (int)(totalSeconds % 60));
     return std::string(buf);
+}
+
+// Connects to Wi-Fi, fetches the time over NTP, and sets the software
+// clock from it — hardcoded to JST (UTC+9, no DST). Wi-Fi is always
+// switched off again afterward, win or lose, so it never lingers on
+// between calculations. Returns false (clock left untouched) on any
+// failure: bad credentials, no AP in range, or no NTP reply in time.
+static bool ntpSyncViaWifi(const std::string& ssid, const std::string& pass) {
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid.c_str(), pass.c_str());
+
+    uint32_t deadline = millis() + 15000;
+    while (WiFi.status() != WL_CONNECTED && millis() < deadline) delay(200);
+
+    bool synced = false;
+    if (WiFi.status() == WL_CONNECTED) {
+        configTime(9 * 3600, 0, "pool.ntp.org", "time.google.com");
+        struct tm timeinfo;
+        if (getLocalTime(&timeinfo, 10000)) {
+            timeBaseSeconds = timeinfo.tm_hour * 3600 + timeinfo.tm_min * 60 + timeinfo.tm_sec;
+            timeBaseMillis = millis();
+            timeSet = true;
+            synced = true;
+        }
+    }
+
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    return synced;
 }
 
 // Parses "settime(H,M,S)" (the part in parens) into three integers.
@@ -890,10 +931,21 @@ static void saveStateToFlash() {
     prefs.end();
 }
 
+// Wi-Fi credentials are saved separately from saveStateToFlash() — that
+// one runs after every calculation, and these change far less often.
+static void saveWifiToFlash() {
+    prefs.begin(PREFS_NS, false);
+    prefs.putString("wssid", wifiSsid.c_str());
+    prefs.putString("wpass", wifiPass.c_str());
+    prefs.end();
+}
+
 static void loadStateFromFlash() {
     prefs.begin(PREFS_NS, true);
     degMode = prefs.getBool("deg", false);
     idleSleepMinutes = prefs.getUInt("sleepmin", 10);
+    wifiSsid = prefs.getString("wssid", "").c_str();
+    wifiPass = prefs.getString("wpass", "").c_str();
     uint32_t n = prefs.getUInt("hn", 0);
     history.clear();
     for (uint32_t i = 0; i < n && i < HISTORY_STORE_CAP; i++) {
@@ -997,6 +1049,45 @@ static void evaluate() {
             resultLine = "Time set to " + formatHMS(timeBaseSeconds);
         } else {
             resultLine = "ERR: settime(H,M,S) 0-23,0-59,0-59";
+        }
+        expr.clear();
+        haveResult = true;
+        browseIndex = -1;
+        cursorPos = 0;
+        return;
+    }
+    if (equalsIgnoreCase(expr, "wifi")) {
+        // Status only, no side effects: never blocks or touches the radio.
+        resultLine = wifiSsid.empty() ? "no wifi saved (wifi(ssid,pass))" : ("saved: " + wifiSsid + " (wifi() to sync)");
+        expr.clear();
+        haveResult = true;
+        browseIndex = -1;
+        cursorPos = 0;
+        return;
+    }
+    if (startsWithIgnoreCase(expr, "wifi(") && !expr.empty() && expr.back() == ')') {
+        size_t open = expr.find('(');
+        size_t close = expr.rfind(')');
+        std::string inner = expr.substr(open + 1, close - open - 1);
+        if (inner.empty()) {
+            // wifi(): retry with whatever is already saved.
+            if (wifiSsid.empty()) {
+                resultLine = "ERR: no saved wifi (use wifi(ssid,pass))";
+            } else {
+                resultLine = ntpSyncViaWifi(wifiSsid, wifiPass) ? ("Time synced: " + formatHMS(currentTimeSeconds()))
+                                                                  : "Wifi/NTP failed (time unchanged)";
+            }
+        } else {
+            size_t comma = inner.find(',');
+            if (comma == std::string::npos) {
+                resultLine = "ERR: wifi(ssid,pass)";
+            } else {
+                wifiSsid = inner.substr(0, comma);
+                wifiPass = inner.substr(comma + 1);
+                saveWifiToFlash(); // kept even if the sync below fails
+                resultLine = ntpSyncViaWifi(wifiSsid, wifiPass) ? ("Time synced: " + formatHMS(currentTimeSeconds()))
+                                                                  : "Saved. Wifi/NTP failed (time unchanged)";
+            }
         }
         expr.clear();
         haveResult = true;
@@ -1245,8 +1336,10 @@ static void clearAll() {
 }
 
 static void handleChar(char c) {
-    // Only accept characters that are meaningful in an expression.
-    static const std::string allowed = "0123456789.+-*/^%()!,";
+    // Only accept characters that are meaningful in an expression, plus
+    // space/underscore for typing wifi(ssid,pass) — most home SSIDs use
+    // only letters, digits, spaces, hyphens, and underscores.
+    static const std::string allowed = "0123456789.+-*/^%()!, _";
     bool isFuncLetter = std::isalpha((unsigned char)c);
     if (allowed.find(c) == std::string::npos && !isFuncLetter) return;
 
@@ -1293,7 +1386,7 @@ static void handleBackspace() {
 // Names Tab-completion will offer, i.e. everything applyIdentifier()
 // recognizes plus the "help" command.
 static const std::vector<std::string> FUNCTION_NAMES = {
-    "pi", "e", "ans", "help", "save", "time", "settime", "usbdrive", "usbdebug", "sleeptime",
+    "pi", "e", "ans", "help", "save", "time", "settime", "usbdrive", "usbdebug", "sleeptime", "wifi",
     "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
     "tanh", "sinh", "cosh", "asinh", "acosh", "atanh",
     "sqrt", "cbrt", "pow", "exp", "log", "ln", "log2",
@@ -1305,7 +1398,7 @@ static const std::vector<std::string> FUNCTION_NAMES = {
 // Words that stand alone (no argument list), so Tab shouldn't add "(".
 static bool isBareWord(const std::string& w) {
     return w == "pi" || w == "e" || w == "ans" || w == "help" || w == "save" || w == "time" || w == "usbdrive" ||
-           w == "usbdebug" || w == "sleeptime";
+           w == "usbdebug" || w == "sleeptime" || w == "wifi";
 }
 
 // Tab-completion state: which span of `expr` is being cycled, and which
