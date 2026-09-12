@@ -188,15 +188,18 @@ Trig functions respect the DEG/RAD toggle above.
 
 ### Trigonometric
 
-| Function | Description | Example | Result |
-|---|---|---|---|
-| `sin(x)` | Sine | `sin(pi/2)` | `1` |
-| `cos(x)` | Cosine | `cos(0)` | `1` |
-| `tan(x)` | Tangent | `tan(pi/4)` | `1` |
-| `asin(x)` | Arcsine | `asin(1)` | `1.570796327` |
-| `acos(x)` | Arccosine | `acos(0)` | `1.570796327` |
-| `atan(x)` | Arctangent | `atan(1)` | `0.7853981634` |
-| `atan2(y,x)` | Angle of point (x,y) | `atan2(1,1)` | `0.7853981634` |
+These respect the DEG/RAD toggle, so the same call gives a different
+result depending on the mode — both are shown below.
+
+| Function | Description | Example (RAD) | Result (RAD) | Example (DEG) | Result (DEG) |
+|---|---|---|---|---|---|
+| `sin(x)` | Sine | `sin(pi/2)` | `1` | `sin(90)` | `1` |
+| `cos(x)` | Cosine | `cos(pi)` | `-1` | `cos(180)` | `-1` |
+| `tan(x)` | Tangent | `tan(pi/4)` | `1` | `tan(45)` | `1` |
+| `asin(x)` | Arcsine | `asin(1)` | `1.570796327` | `asin(1)` | `90` |
+| `acos(x)` | Arccosine | `acos(0)` | `1.570796327` | `acos(0)` | `90` |
+| `atan(x)` | Arctangent | `atan(1)` | `0.7853981634` | `atan(1)` | `45` |
+| `atan2(y,x)` | Angle of point (x,y) | `atan2(1,1)` | `0.7853981634` | `atan2(1,1)` | `45` |
 
 ### Hyperbolic
 
