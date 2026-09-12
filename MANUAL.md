@@ -81,6 +81,34 @@ the screen itself:
 - `fn` + `;` / `fn` + `.` — flip pages
 - `Enter` or `Backspace` — return to the calculator
 
+## Saving your history
+
+**Automatic, to internal flash:** history (up to the last 20 calculations)
+and the DEG/RAD setting are saved after every calculation to the ESP32's
+internal flash (NVS), and restored automatically on boot. This needs no SD
+card and survives a full power cycle — turning the calculator off and back
+on won't lose your history.
+
+**Manual, to a microSD card:** type `save` and press `Enter`. If a microSD
+card is inserted, the current history is appended to `/calc_log.txt` as
+plain text, e.g.:
+
+```
+---- save #1 (3 entries, RAD) ----
+2+3 = 5
+10*2 = 20
+ans(1)+ans(2) = 25
+
+```
+
+Each `save` appends a new labeled block rather than overwriting the file,
+so running it repeatedly builds up a running log — but note it re-writes
+whatever is currently in the on-screen history each time, so running `save`
+twice without any new calculation in between will duplicate that block.
+Read the file on a computer with any microSD card reader. If no card is
+present (or it fails to initialize), the calculator shows `SD ERR` instead
+of a result and continues working normally otherwise.
+
 ## Function reference
 
 Trig functions respect the DEG/RAD toggle above.

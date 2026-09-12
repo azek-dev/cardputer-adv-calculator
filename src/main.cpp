@@ -36,10 +36,20 @@
 //
 // Type "help" and press Enter for an on-screen function reference
 // (fn+;/. flips pages, Enter or Backspace exits back to the calculator).
+//
+// History (and the DEG/RAD setting) is auto-saved to the ESP32's internal
+// flash (NVS) after every calculation, and restored on boot — this works
+// even without an SD card inserted, and survives power loss.
+//
+// Type "save" and press Enter to additionally append the current history
+// to /calc_log.txt on a microSD card, as plain text you can read on a PC.
 
 #include <M5Cardputer.h>
 #include <M5GFX.h>
 #include <esp_random.h>
+#include <Preferences.h>
+#include <SPI.h>
+#include <SD.h>
 #include <cmath>
 #include <vector>
 #include <string>
@@ -47,6 +57,18 @@
 #include <utility>
 
 static M5Canvas canvas(&M5Cardputer.Display);
+
+// microSD wiring on both Cardputer and Cardputer ADV (per M5Stack's
+// official examples) — SPI bus is not shared with anything else.
+static const int SD_SPI_SCK_PIN = 40;
+static const int SD_SPI_MISO_PIN = 39;
+static const int SD_SPI_MOSI_PIN = 14;
+static const int SD_SPI_CS_PIN = 12;
+static const char* SD_LOG_PATH = "/calc_log.txt";
+static bool sdReady = false;
+
+static Preferences prefs;
+static const char* PREFS_NS = "calc";
 
 struct HistEntry {
     std::string expr;
@@ -72,6 +94,7 @@ static const std::vector<std::vector<std::string>> helpPages = {
     {"Combinatorics/random:", "ncr(n,r) npr(n,r)", "rand() rand(lo,hi)", "randint(lo,hi) (inclusive)", "ex: randint(1,6) = dice"},
     {"Rounding & misc:", "abs floor ceil round int", "pi  e  x!  ^  %", "ex: int(rand(1,11)) = 1..10"},
     {"Previous results:", "ans = most recent result", "ans(n) = n-th most recent", "ex: ans(1)+ans(2)+ans(3)"},
+    {"Saving:", "History auto-saves to flash", "(survives power off, no SD", "card needed).", "Type save + Enter to also", "append it to calc_log.txt", "on a microSD card."},
     {"Keys:", "fn+BkSp = clear all", "fn+;/.  = history up/down", "fn+,//  = cursor left/right", "opt+D   = deg/rad toggle", "Tab     = complete func name"},
 };
 
@@ -446,6 +469,67 @@ static bool equalsIgnoreCase(const std::string& a, const char* b) {
     return i == a.size() && b[i] == '\0';
 }
 
+// ---------------------------------------------------------------------
+// Persistence: history + settings auto-saved to internal flash (NVS),
+// and an explicit text export to a microSD card.
+// ---------------------------------------------------------------------
+static void saveStateToFlash() {
+    prefs.begin(PREFS_NS, false);
+    prefs.putBool("deg", degMode);
+    prefs.putUInt("hn", (uint32_t)history.size());
+    for (size_t i = 0; i < history.size(); i++) {
+        char key[12];
+        snprintf(key, sizeof(key), "he%u", (unsigned)i);
+        prefs.putString(key, history[i].expr.c_str());
+        snprintf(key, sizeof(key), "hr%u", (unsigned)i);
+        prefs.putString(key, history[i].result.c_str());
+        snprintf(key, sizeof(key), "hv%u", (unsigned)i);
+        prefs.putDouble(key, history[i].value);
+    }
+    prefs.end();
+}
+
+static void loadStateFromFlash() {
+    prefs.begin(PREFS_NS, true);
+    degMode = prefs.getBool("deg", false);
+    uint32_t n = prefs.getUInt("hn", 0);
+    history.clear();
+    for (uint32_t i = 0; i < n && i < HISTORY_STORE_CAP; i++) {
+        char key[12];
+        HistEntry he;
+        snprintf(key, sizeof(key), "he%u", (unsigned)i);
+        he.expr = prefs.getString(key, "").c_str();
+        snprintf(key, sizeof(key), "hr%u", (unsigned)i);
+        he.result = prefs.getString(key, "").c_str();
+        snprintf(key, sizeof(key), "hv%u", (unsigned)i);
+        he.value = prefs.getDouble(key, 0.0);
+        history.push_back(he);
+    }
+    prefs.end();
+}
+
+// Appends the current in-memory history to /calc_log.txt on the SD card
+// as a labeled block, so re-running "save" doesn't overwrite older saves.
+static bool saveHistoryToSD() {
+    if (!sdReady) return false;
+    File f = SD.open(SD_LOG_PATH, FILE_APPEND);
+    if (!f) return false;
+
+    prefs.begin(PREFS_NS, false);
+    uint32_t saveNum = prefs.getUInt("savenum", 0) + 1;
+    prefs.putUInt("savenum", saveNum);
+    prefs.end();
+
+    f.printf("---- save #%u (%u entries, %s) ----\n", (unsigned)saveNum,
+              (unsigned)history.size(), degMode ? "DEG" : "RAD");
+    for (auto& h : history) {
+        f.printf("%s = %s\n", h.expr.c_str(), h.result.c_str());
+    }
+    f.println();
+    f.close();
+    return true;
+}
+
 static void evaluate() {
     if (expr.empty()) return;
     if (equalsIgnoreCase(expr, "help")) {
@@ -458,6 +542,15 @@ static void evaluate() {
         cursorPos = 0;
         return;
     }
+    if (equalsIgnoreCase(expr, "save")) {
+        bool ok = saveHistoryToSD();
+        resultLine = ok ? ("Saved to " + std::string(SD_LOG_PATH)) : "SD ERR (no card?)";
+        expr.clear();
+        haveResult = true;
+        browseIndex = -1;
+        cursorPos = 0;
+        return;
+    }
     try {
         Parser p(expr, degMode);
         double v = p.run();
@@ -466,6 +559,7 @@ static void evaluate() {
         history.push_back({expr, res, v});
         if (history.size() > HISTORY_STORE_CAP) history.erase(history.begin());
         haveResult = true;
+        saveStateToFlash();
     } catch (const std::exception& ex) {
         resultLine = std::string("ERR: ") + ex.what();
         haveResult = true;
@@ -644,7 +738,7 @@ static void handleBackspace() {
 // Names Tab-completion will offer, i.e. everything applyIdentifier()
 // recognizes plus the "help" command.
 static const std::vector<std::string> FUNCTION_NAMES = {
-    "pi", "e", "ans", "help",
+    "pi", "e", "ans", "help", "save",
     "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
     "tanh", "sinh", "cosh", "asinh", "acosh", "atanh",
     "sqrt", "cbrt", "pow", "exp", "log", "ln", "log2",
@@ -655,7 +749,7 @@ static const std::vector<std::string> FUNCTION_NAMES = {
 
 // Words that stand alone (no argument list), so Tab shouldn't add "(".
 static bool isBareWord(const std::string& w) {
-    return w == "pi" || w == "e" || w == "ans" || w == "help";
+    return w == "pi" || w == "e" || w == "ans" || w == "help" || w == "save";
 }
 
 // Tab-completion state: which span of `expr` is being cycled, and which
@@ -725,6 +819,13 @@ void setup() {
     historyDisplayCap = std::min(fits, HISTORY_STORE_CAP);
     if (historyDisplayCap < 1) historyDisplayCap = 1;
 
+    loadStateFromFlash(); // restore history + DEG/RAD from before power-off
+
+    // SD card is optional: the calculator works fine without one, "save"
+    // just reports an error until a card is present.
+    SPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
+    sdReady = SD.begin(SD_SPI_CS_PIN, SPI, 25000000);
+
     render();
 }
 
@@ -782,6 +883,7 @@ void loop() {
                 cursorRight();
             } else if (optD) {
                 degMode = !degMode;
+                saveStateToFlash();
             } else if (status.del) {
                 handleBackspace();
             } else if (status.enter) {

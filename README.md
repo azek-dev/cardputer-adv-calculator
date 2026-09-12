@@ -22,6 +22,10 @@ on the built-in QWERTY keyboard and evaluate them with Enter — like
 - Cursor-based editing (`fn+,` / `fn+/`) — not just backspace-from-the-end
 - Tab-completion for function names (press again to cycle multiple matches)
 - On-device help screen — type `help` and press Enter
+- History and DEG/RAD setting auto-save to internal flash and survive
+  power-off, no SD card required
+- Type `save` and press Enter to also export the current history as plain
+  text to `calc_log.txt` on a microSD card
 
 ## Keys
 
