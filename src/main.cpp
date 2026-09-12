@@ -1418,6 +1418,9 @@ static void handleTab() {
         std::string prefix = expr.substr(start, cursorPos - start);
         if (prefix.empty()) return;
 
+        // Kept in FUNCTION_NAMES's own declared order (not alphabetical),
+        // so more commonly-used names can be placed to complete first —
+        // e.g. usbdrive before usbdebug.
         std::vector<std::string> matches;
         for (auto& name : FUNCTION_NAMES) {
             if (name.size() >= prefix.size() && name.compare(0, prefix.size(), prefix) == 0) {
@@ -1425,7 +1428,6 @@ static void handleTab() {
             }
         }
         if (matches.empty()) return;
-        std::sort(matches.begin(), matches.end());
 
         tabWordStart = start;
         tabCandidates = matches;
