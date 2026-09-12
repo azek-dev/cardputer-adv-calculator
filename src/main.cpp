@@ -57,6 +57,8 @@
 // mscWriteSector below) are adapted from MOY-lightening-firmware's
 // "M5-cardputer-mass-storage" (MIT License, Copyright (c) 2026 OZAN),
 // https://github.com/MOY-lightening-firmware/M5-cardputer-mass-storage
+// If "usbdrive" fails on a particular card, "usbdebug" (after a reset)
+// shows the last low-level SD error recorded during that attempt.
 
 #include <M5Cardputer.h>
 #include <M5GFX.h>
@@ -102,6 +104,23 @@ static SPIClass mscSPI(HSPI);
 static bool mscCardIsHC = false;
 static bool mscModeActive = false;
 
+// Diagnostics for usbdrive: USB CDC/serial disappears the instant MSC
+// mode enumerates, so Serial.printf can't be read live — record the last
+// low-level SD failure to NVS instead, retrievable after a reset via the
+// "usbdebug" command. Cheap (only writes on a failure path) and handy if
+// a particular SD card turns out to be flaky/incompatible.
+static void mscDebugLog(const char* tag, uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
+    Preferences p;
+    p.begin("mscdbg", false);
+    p.putUInt("n", p.getUInt("n", 0) + 1);
+    p.putString("tag", tag);
+    p.putUInt("a", a);
+    p.putUInt("b", b);
+    p.putUInt("c", c);
+    p.putUInt("d", d);
+    p.end();
+}
+
 static uint8_t mscSdTransfer(uint8_t b) { return mscSPI.transfer(b); }
 
 static void mscSdSelect() {
@@ -141,11 +160,20 @@ static uint8_t mscSdCmd(uint8_t cmd, uint32_t arg) {
 // Re-initializes the SD card at the raw SPI protocol level (independent
 // of SD.h's FAT mount, which must already be released via SD.end()).
 static bool mscSdRawInit() {
+    mscCardIsHC = false;
     mscSPI.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
     mscSdDeselect();
-    for (int i = 0; i < 10; i++) mscSdTransfer(0xFF);
+    for (int i = 0; i < 20; i++) mscSdTransfer(0xFF);
 
-    if (mscSdCmd(0, 0) != 0x01) {
+    // The card was just handed over from SD.h's own driver, which may
+    // leave it mid-transaction; CMD0 often needs a few tries before the
+    // card actually drops into SPI idle state in that situation.
+    bool idle = false;
+    for (int attempt = 0; attempt < 10 && !idle; attempt++) {
+        idle = (mscSdCmd(0, 0) == 0x01);
+        if (!idle) delay(10);
+    }
+    if (!idle) {
         mscSPI.endTransaction();
         return false;
     }
@@ -168,7 +196,15 @@ static bool mscSdRawInit() {
         }
     } while (r != 0x00);
 
-    if (v2 && mscSdCmd(58, 0) == 0x00) {
+    // For v2+ cards we must positively confirm HC/XC (block-addressed) vs.
+    // SDSC (byte-addressed) — guessing wrong silently corrupts every read
+    // past the first sector, so treat a failed OCR read as a hard error
+    // instead of quietly defaulting to SDSC addressing.
+    if (v2) {
+        if (mscSdCmd(58, 0) != 0x00) {
+            mscSPI.endTransaction();
+            return false;
+        }
         uint8_t ocr[4];
         for (int i = 0; i < 4; i++) ocr[i] = mscSdTransfer(0xFF);
         mscCardIsHC = (ocr[0] & 0x40) != 0;
@@ -207,6 +243,7 @@ static bool mscReadSectors(uint8_t* buf, uint32_t lba, uint32_t count) {
         if (r1 != 0x00) {
             mscSdDeselect();
             mscSPI.endTransaction();
+            mscDebugLog("rd_cmd17", r1, lba + i, addr, mscCardIsHC ? 1 : 0);
             return false;
         }
 
@@ -219,6 +256,7 @@ static bool mscReadSectors(uint8_t* buf, uint32_t lba, uint32_t count) {
         if (token != 0xFE) {
             mscSdDeselect();
             mscSPI.endTransaction();
+            mscDebugLog("rd_token", token, lba + i, addr, mscCardIsHC ? 1 : 0);
             return false;
         }
 
@@ -254,6 +292,7 @@ static bool mscWriteSectors(const uint8_t* buf, uint32_t lba, uint32_t count) {
         if (r1 != 0x00) {
             mscSdDeselect();
             mscSPI.endTransaction();
+            mscDebugLog("wr_cmd24", r1, lba + i, addr, mscCardIsHC ? 1 : 0);
             return false;
         }
 
@@ -267,6 +306,7 @@ static bool mscWriteSectors(const uint8_t* buf, uint32_t lba, uint32_t count) {
         if ((dresp & 0x1F) != 0x05) {
             mscSdDeselect();
             mscSPI.endTransaction();
+            mscDebugLog("wr_dresp", dresp, lba + i, addr, mscCardIsHC ? 1 : 0);
             return false;
         }
 
@@ -281,17 +321,25 @@ static bool mscWriteSectors(const uint8_t* buf, uint32_t lba, uint32_t count) {
 }
 
 static int32_t mscOnRead(uint32_t lba, uint32_t offset, void* buffer, uint32_t bufsize) {
-    (void)offset;
     uint32_t count = bufsize / MSC_SECTOR_SIZE;
-    if (count == 0) return -1;
-    return mscReadSectors((uint8_t*)buffer, lba, count) ? (int32_t)bufsize : -1;
+    if (count == 0 || offset != 0) {
+        mscDebugLog("rd_reject", lba, offset, bufsize, 0);
+        return -1;
+    }
+    bool ok = mscReadSectors((uint8_t*)buffer, lba, count);
+    // (mscReadSectors already logs the specific failure reason/sector)
+    return ok ? (int32_t)bufsize : -1;
 }
 
 static int32_t mscOnWrite(uint32_t lba, uint32_t offset, uint8_t* buffer, uint32_t bufsize) {
-    (void)offset;
     uint32_t count = bufsize / MSC_SECTOR_SIZE;
-    if (count == 0) return -1;
-    return mscWriteSectors(buffer, lba, count) ? (int32_t)bufsize : -1;
+    if (count == 0 || offset != 0) {
+        mscDebugLog("wr_reject", lba, offset, bufsize, 0);
+        return -1;
+    }
+    bool ok = mscWriteSectors(buffer, lba, count);
+    // (mscWriteSectors already logs the specific failure reason/sector)
+    return ok ? (int32_t)bufsize : -1;
 }
 
 static bool mscOnStartStop(uint8_t power_condition, bool start, bool load_eject) {
@@ -308,11 +356,17 @@ static bool enterUsbDriveMode() {
     if (!sdReady || sdSectorCount == 0) return false;
 
     SD.end(); // release the FAT mount before raw sector access begins
+    SPI.end(); // and fully free the peripheral/GPIO-matrix routing it held
+               // on these same pins, or mscSPI's own routing gets corrupted
     delay(20);
     pinMode(SD_SPI_CS_PIN, OUTPUT);
     mscSPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
 
-    if (!mscSdRawInit()) return false;
+    if (!mscSdRawInit()) {
+        mscDebugLog("raw_init_fail", 0, 0, 0, 0);
+        return false;
+    }
+    mscDebugLog("raw_init_ok", mscCardIsHC ? 1 : 0, sdSectorCount, 0, 0);
 
     MSC.vendorID("CalcCard");
     MSC.productID("Cardputer");
@@ -357,7 +411,7 @@ static const std::vector<std::vector<std::string>> helpPages = {
     {"Previous results:", "ans = most recent result", "ans(n) = n-th most recent", "ex: ans(1)+ans(2)+ans(3)"},
     {"Saving:", "History auto-saves to flash", "(survives power off, no SD", "card needed).", "Type save + Enter to also", "append it to calc_log.txt", "on a microSD card."},
     {"Clock (no RTC on this", "board, resets each boot):", "settime(H,M,S) sets it", "time shows current H:M:S", "ex: settime(9,30,0)"},
-    {"USB drive mode:", "usbdrive exposes the SD", "card to a computer over", "USB. Needs reset/power-", "cycle to return to the", "calculator afterward."},
+    {"USB drive mode:", "usbdrive exposes the SD", "card to a computer over", "USB. Needs reset/power-", "cycle to return to the", "calculator afterward.", "usbdebug shows why it", "failed, after a reset."},
     {"Keys:", "fn+BkSp = clear all", "fn+;/.  = history up/down", "fn+,//  = cursor left/right", "opt+D   = deg/rad toggle", "Tab     = complete func name"},
 };
 
@@ -916,6 +970,30 @@ static void evaluate() {
         cursorPos = 0;
         return;
     }
+    if (equalsIgnoreCase(expr, "usbdebug")) {
+        // Shows the last mscDebugLog() entry recorded during a usbdrive
+        // session — useful if usbdrive fails on a particular SD card.
+        Preferences dbg;
+        dbg.begin("mscdbg", true);
+        uint32_t n = dbg.getUInt("n", 0);
+        if (n == 0) {
+            resultLine = "no msc debug data";
+        } else {
+            std::string tag = dbg.getString("tag", "").c_str();
+            char buf[64];
+            snprintf(buf, sizeof(buf), "%s a=%lu b=%lu c=%lu d=%lu n=%lu", tag.c_str(),
+                     (unsigned long)dbg.getUInt("a", 0), (unsigned long)dbg.getUInt("b", 0),
+                     (unsigned long)dbg.getUInt("c", 0), (unsigned long)dbg.getUInt("d", 0),
+                     (unsigned long)n);
+            resultLine = buf;
+        }
+        dbg.end();
+        expr.clear();
+        haveResult = true;
+        browseIndex = -1;
+        cursorPos = 0;
+        return;
+    }
     try {
         Parser p(expr, degMode);
         double v = p.run();
@@ -1129,7 +1207,7 @@ static void handleBackspace() {
 // Names Tab-completion will offer, i.e. everything applyIdentifier()
 // recognizes plus the "help" command.
 static const std::vector<std::string> FUNCTION_NAMES = {
-    "pi", "e", "ans", "help", "save", "time", "settime", "usbdrive",
+    "pi", "e", "ans", "help", "save", "time", "settime", "usbdrive", "usbdebug",
     "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
     "tanh", "sinh", "cosh", "asinh", "acosh", "atanh",
     "sqrt", "cbrt", "pow", "exp", "log", "ln", "log2",
@@ -1140,7 +1218,8 @@ static const std::vector<std::string> FUNCTION_NAMES = {
 
 // Words that stand alone (no argument list), so Tab shouldn't add "(".
 static bool isBareWord(const std::string& w) {
-    return w == "pi" || w == "e" || w == "ans" || w == "help" || w == "save" || w == "time" || w == "usbdrive";
+    return w == "pi" || w == "e" || w == "ans" || w == "help" || w == "save" || w == "time" || w == "usbdrive" ||
+           w == "usbdebug";
 }
 
 // Tab-completion state: which span of `expr` is being cycled, and which
@@ -1194,6 +1273,7 @@ static void handleTab() {
 }
 
 void setup() {
+    Serial.begin(115200);
     auto cfg = M5.config();
     M5Cardputer.begin(cfg, true);
     M5Cardputer.Display.setRotation(1);
@@ -1227,13 +1307,12 @@ static bool wordHas(const Keyboard_Class::KeysState& s, char c) {
 
 void loop() {
     if (mscModeActive) {
-        // The SD card now belongs entirely to the raw MSC callbacks;
-        // don't touch the keyboard/SD-via-SD.h from here until reset.
-        static uint32_t lastDraw = 0;
-        if (millis() - lastDraw > 1000) {
-            lastDraw = millis();
-            render();
-        }
+        // The SD card now belongs entirely to the raw MSC callbacks; do
+        // nothing at all here, not even redraw the display — the display
+        // is also SPI, and any activity on it while a raw SD transaction
+        // from the host is in flight was corrupting reads (this was the
+        // actual bug behind read failures during mount).
+        delay(1000);
         return;
     }
 

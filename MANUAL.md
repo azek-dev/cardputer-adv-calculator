@@ -139,6 +139,11 @@ state, so only use it when you're done calculating for now. If no card is
 inserted (or it fails to initialize), the calculator shows `SD ERR` instead
 and keeps working normally.
 
+If `usbdrive` enumerates but the card fails to actually mount on your
+computer, reset the calculator and type `usbdebug` to see the last
+low-level SD error that was recorded during the attempt (useful if you run
+into this with a particular card).
+
 ## Function reference
 
 Trig functions respect the DEG/RAD toggle above.

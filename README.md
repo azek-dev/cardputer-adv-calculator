@@ -30,7 +30,8 @@ on the built-in QWERTY keyboard and evaluate them with Enter — like
   hardware), timestamps `save` entries; resets on power-cycle
 - `usbdrive` — expose the microSD card to a computer over USB as an
   ordinary drive, no card removal needed (requires a reset to return to
-  the calculator afterward)
+  the calculator afterward); `usbdebug` shows the last low-level SD
+  error if it fails on a particular card
 
 ## Keys
 
