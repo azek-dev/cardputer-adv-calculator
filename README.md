@@ -40,6 +40,9 @@ that result (chained, like a normal calculator); typing anything else starts
 a fresh expression. Pressing `Backspace` right after a result re-opens that
 expression for editing instead of clearing it.
 
+See **[MANUAL.md](MANUAL.md)** for a full walkthrough and the complete
+function reference with examples.
+
 ## Building
 
 Requires [PlatformIO Core](https://platformio.org/install/cli).
