@@ -424,12 +424,12 @@ static size_t cursorPos = 0;      // insert/delete position within `expr`
 static bool helpMode = false;
 static int helpPage = 0;
 static const std::vector<std::vector<std::string>> helpPages = {
-    {"Trig (opt+D = deg/rad):", "sin cos tan", "asin acos atan", "atan2(y,x)", "ex: sin(pi/2) = 1"},
-    {"Hyperbolic:", "sinh cosh tanh", "asinh acosh atanh", "ex: tanh(1) = 0.7615..."},
-    {"Power & log:", "sqrt cbrt pow(x,y)", "exp log ln log2(x)", "ex: pow(2,10) = 1024"},
-    {"Compare & integer:", "min(a,b) max(a,b)", "clamp(x,lo,hi)", "gcd(a,b) lcm(a,b) mod(a,b)", "ex: gcd(12,18) = 6"},
-    {"Combinatorics/random:", "ncr(n,r) npr(n,r)", "rand() rand(lo,hi)", "randint(lo,hi) (inclusive)", "ex: randint(1,6) = dice"},
-    {"Rounding & misc:", "abs floor ceil round int", "pi  e  x!  ^  %", "ex: int(rand(1,11)) = 1..10"},
+    {"Trig & hyperbolic:", "sin cos tan atan2 (opt+D", " toggles deg/rad)",
+     "sinh cosh tanh", "asinh acosh atanh", "ex: sin(pi/2)=1  tanh(1)=.76"},
+    {"Power/log & compare:", "sqrt cbrt pow(x,y)", "exp log ln log2(x)",
+     "min max clamp(x,lo,hi)", "gcd lcm mod(a,b)", "ex: pow(2,10)=1024", "ex: gcd(12,18)=6"},
+    {"Combinatorics & rounding:", "ncr(n,r) npr(n,r)", "rand() rand(lo,hi)",
+     "randint(lo,hi) inclusive", "abs floor ceil round int", "pi e x! ^ %", "ex: randint(1,6)=dice"},
     {"Previous results:", "ans = most recent result", "ans(n) = n-th most recent", "ex: ans(1)+ans(2)+ans(3)"},
     {"Saving:", "History auto-saves to flash", "(survives power off, no SD", "card needed).", "Type save + Enter to also", "append it to calc_log.txt", "on a microSD card."},
     {"Clock (no RTC on this", "board, resets each boot):", "timeset(H,M,S) sets it", "time shows current H:M:S", "ex: timeset(9,30,0)"},
