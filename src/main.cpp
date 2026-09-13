@@ -44,16 +44,18 @@
 // Type "save" and press Enter to additionally append the current history
 // to /calc_log.txt on a microSD card, as plain text you can read on a PC.
 //
-// There's no RTC chip on this hardware, so there's no real clock unless
-// you set one. "timeset(H,M,S)" sets a reference time by hand (from
-// millis() elapsed since); "time" shows the current computed time. This
-// resets on every power-cycle — re-run timeset() after each boot.
+// There's no RTC chip on this hardware, so there's no real clock (or
+// calendar) unless you set one. "timeset(H,M,S)" / "dateset(Y,M,D)" each
+// set a reference by hand (from millis() elapsed since, independently of
+// each other); "time" / "date" show the current computed value. Both
+// reset on every power-cycle — re-run after each boot if you want them.
 //
 // Alternatively, "wifi(ssid,pass)" saves Wi-Fi credentials to flash and
-// immediately syncs the clock via NTP (hardcoded to JST); "wifi()" retries
-// with the saved credentials (e.g. after a reboot); bare "wifi" just shows
-// what's saved. Nothing here ever prompts for Wi-Fi automatically — it's
-// entirely opt-in, and boot/typing/calculating is unaffected if unused.
+// immediately syncs both the time and date via NTP (hardcoded to JST);
+// "wifi()" retries with the saved credentials (e.g. after a reboot); bare
+// "wifi" just shows what's saved. Nothing here ever prompts for Wi-Fi
+// automatically — it's entirely opt-in, and boot/typing/calculating is
+// unaffected if unused.
 //
 // The calculator deep-sleeps after 10 minutes with no key press, or
 // immediately if the physical G0/BtnA button (on top of the device) is
@@ -432,7 +434,7 @@ static const std::vector<std::vector<std::string>> helpPages = {
      "randint(lo,hi) inclusive", "abs floor ceil round int", "pi e x! ^ %", "ex: randint(1,6)=dice"},
     {"Previous results:", "ans = most recent result", "ans(n) = n-th most recent", "ex: ans(1)+ans(2)+ans(3)"},
     {"Saving:", "History auto-saves to flash", "(survives power off, no SD", "card needed).", "Type save + Enter to also", "append it to calc_log.txt", "on a microSD card."},
-    {"Clock (no RTC on this", "board, resets each boot):", "timeset(H,M,S) sets it", "time shows current H:M:S", "ex: timeset(9,30,0)"},
+    {"Clock (no RTC on this", "board, resets each boot):", "timeset(H,M,S) / time", "dateset(Y,M,D) / date", "ex: timeset(9,30,0)", "ex: dateset(2026,9,13)"},
     {"USB drive mode:", "usbdrive exposes the SD", "card to a computer over", "USB. Needs reset/power-", "cycle to return to the", "calculator afterward.", "usbdebug shows why it", "failed, after a reset."},
     {"Auto-sleep (no PMIC, so", "this is deep sleep, not a", "real power-off):", "sleeptime(n) sets n min", "sleeptime shows current", "G0/BtnA (top button) also", "sleeps/wakes on demand;", "wake retries saved wifi"},
     {"Wifi time sync (opt-in,", "never asked automatically):", "wifi(ssid,pass) saves +", "syncs via NTP (JST)", "wifi() retries saved creds", "wifi shows saved SSID"},
@@ -826,16 +828,20 @@ static bool startsWithIgnoreCase(const std::string& a, const char* prefix) {
 }
 
 // ---------------------------------------------------------------------
-// Software clock: this hardware has no RTC chip, so there's no time
-// source unless the user sets one — either manually (timeset()) or, if
-// Wi-Fi credentials have been saved (wifi()), via NTP. Either way it just
-// anchors a wall-clock time to the current millis(); currentTimeSeconds()
-// projects it forward. Resets to "unset" on every power-cycle (Wi-Fi
-// credentials themselves persist in flash; the clock does not).
+// Software clock: this hardware has no RTC chip, so there's no time (or
+// date) source unless the user sets one — either manually (timeset()/
+// dateset()) or, if Wi-Fi credentials have been saved (wifi()), via NTP,
+// which sets both at once. Time-of-day and the date are tracked
+// independently, each anchored to millis() when it was set; either can
+// be set without the other. Resets to "unset" on every power-cycle
+// (Wi-Fi credentials themselves persist in flash; the clock does not).
 // ---------------------------------------------------------------------
 static bool timeSet = false;
 static uint32_t timeBaseMillis = 0;
 static int32_t timeBaseSeconds = 0;
+static bool dateSet = false;
+static uint32_t dateBaseMillis = 0;
+static int dateBaseYear = 1970, dateBaseMonth = 1, dateBaseDay = 1;
 static std::string wifiSsid;
 static std::string wifiPass;
 
@@ -850,6 +856,32 @@ static std::string formatHMS(int32_t totalSeconds) {
     char buf[16];
     snprintf(buf, sizeof(buf), "%02d:%02d:%02d", (int)(totalSeconds / 3600),
              (int)((totalSeconds % 3600) / 60), (int)(totalSeconds % 60));
+    return std::string(buf);
+}
+
+// Projects the date forward by however many whole days have elapsed
+// since dateset()/wifi() last set it, via mktime/localtime so month/year
+// rollover and leap years are handled correctly instead of hand-rolled.
+static void currentDateYMD(int& y, int& m, int& d) {
+    uint32_t elapsedMs = millis() - dateBaseMillis; // unsigned wraparound-safe
+    int32_t daysElapsed = (int32_t)(elapsedMs / 86400000UL);
+
+    struct tm t = {};
+    t.tm_year = dateBaseYear - 1900;
+    t.tm_mon = dateBaseMonth - 1;
+    t.tm_mday = dateBaseDay;
+    t.tm_hour = 12; // noon: keeps this well away from any DST edge case
+    time_t base = mktime(&t);
+    time_t now = base + (time_t)daysElapsed * 86400;
+    struct tm* r = localtime(&now);
+    y = r->tm_year + 1900;
+    m = r->tm_mon + 1;
+    d = r->tm_mday;
+}
+
+static std::string formatYMD(int y, int m, int d) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%04d-%02d-%02d", y, m, d);
     return std::string(buf);
 }
 
@@ -873,6 +905,11 @@ static bool ntpSyncViaWifi(const std::string& ssid, const std::string& pass) {
             timeBaseSeconds = timeinfo.tm_hour * 3600 + timeinfo.tm_min * 60 + timeinfo.tm_sec;
             timeBaseMillis = millis();
             timeSet = true;
+            dateBaseYear = timeinfo.tm_year + 1900;
+            dateBaseMonth = timeinfo.tm_mon + 1;
+            dateBaseDay = timeinfo.tm_mday;
+            dateBaseMillis = millis();
+            dateSet = true;
             synced = true;
         }
     }
@@ -882,8 +919,9 @@ static bool ntpSyncViaWifi(const std::string& ssid, const std::string& pass) {
     return synced;
 }
 
-// Parses "timeset(H,M,S)" (the part in parens) into three integers.
-static bool parseTimesetArgs(const std::string& s, int& h, int& m, int& sec) {
+// Parses "name(a,b,c)" (the part in parens) into three integers — used
+// by both timeset(H,M,S) and dateset(Y,M,D).
+static bool parseThreeIntArgs(const std::string& s, int& h, int& m, int& sec) {
     size_t open = s.find('(');
     size_t close = s.rfind(')');
     if (open == std::string::npos || close == std::string::npos || close <= open) return false;
@@ -1003,7 +1041,15 @@ static bool saveHistoryToSD() {
     prefs.putUInt("savenum", saveNum);
     prefs.end();
 
-    std::string tsSuffix = timeSet ? (" @ " + formatHMS(currentTimeSeconds())) : std::string("");
+    std::string tsSuffix;
+    if (dateSet) {
+        int y, m, d;
+        currentDateYMD(y, m, d);
+        tsSuffix += " @ " + formatYMD(y, m, d);
+        if (timeSet) tsSuffix += " " + formatHMS(currentTimeSeconds());
+    } else if (timeSet) {
+        tsSuffix = " @ " + formatHMS(currentTimeSeconds());
+    }
     f.printf("---- save #%u (%u entries, %s)%s ----\n", (unsigned)saveNum,
               (unsigned)history.size(), degMode ? "DEG" : "RAD", tsSuffix.c_str());
     for (auto& h : history) {
@@ -1045,13 +1091,45 @@ static void evaluate() {
     }
     if (startsWithIgnoreCase(expr, "timeset(") && !expr.empty() && expr.back() == ')') {
         int h, m, s;
-        if (parseTimesetArgs(expr, h, m, s) && h >= 0 && h < 24 && m >= 0 && m < 60 && s >= 0 && s < 60) {
+        if (parseThreeIntArgs(expr, h, m, s) && h >= 0 && h < 24 && m >= 0 && m < 60 && s >= 0 && s < 60) {
             timeBaseSeconds = h * 3600 + m * 60 + s;
             timeBaseMillis = millis();
             timeSet = true;
             resultLine = "Time set to " + formatHMS(timeBaseSeconds);
         } else {
             resultLine = "ERR: timeset(H,M,S) 0-23,0-59,0-59";
+        }
+        expr.clear();
+        haveResult = true;
+        browseIndex = -1;
+        cursorPos = 0;
+        return;
+    }
+    if (equalsIgnoreCase(expr, "date")) {
+        int y, m, d;
+        if (dateSet) {
+            currentDateYMD(y, m, d);
+            resultLine = formatYMD(y, m, d);
+        } else {
+            resultLine = "Date not set (dateset(Y,M,D))";
+        }
+        expr.clear();
+        haveResult = true;
+        browseIndex = -1;
+        cursorPos = 0;
+        return;
+    }
+    if (startsWithIgnoreCase(expr, "dateset(") && !expr.empty() && expr.back() == ')') {
+        int y, m, d;
+        if (parseThreeIntArgs(expr, y, m, d) && y >= 2000 && y <= 2099 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+            dateBaseYear = y;
+            dateBaseMonth = m;
+            dateBaseDay = d;
+            dateBaseMillis = millis();
+            dateSet = true;
+            resultLine = "Date set to " + formatYMD(y, m, d);
+        } else {
+            resultLine = "ERR: dateset(Y,M,D) e.g. dateset(2026,9,13)";
         }
         expr.clear();
         haveResult = true;
@@ -1389,7 +1467,7 @@ static void handleBackspace() {
 // Names Tab-completion will offer, i.e. everything applyIdentifier()
 // recognizes plus the "help" command.
 static const std::vector<std::string> FUNCTION_NAMES = {
-    "pi", "e", "ans", "help", "save", "time", "timeset", "usbdrive", "usbdebug", "sleeptime", "wifi",
+    "pi", "e", "ans", "help", "save", "time", "timeset", "date", "dateset", "usbdrive", "usbdebug", "sleeptime", "wifi",
     "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
     "tanh", "sinh", "cosh", "asinh", "acosh", "atanh",
     "sqrt", "cbrt", "pow", "exp", "log", "ln", "log2",
@@ -1400,8 +1478,8 @@ static const std::vector<std::string> FUNCTION_NAMES = {
 
 // Words that stand alone (no argument list), so Tab shouldn't add "(".
 static bool isBareWord(const std::string& w) {
-    return w == "pi" || w == "e" || w == "ans" || w == "help" || w == "save" || w == "time" || w == "usbdrive" ||
-           w == "usbdebug" || w == "sleeptime" || w == "wifi";
+    return w == "pi" || w == "e" || w == "ans" || w == "help" || w == "save" || w == "time" || w == "date" ||
+           w == "usbdrive" || w == "usbdebug" || w == "sleeptime" || w == "wifi";
 }
 
 // Tab-completion state: which span of `expr` is being cycled, and which

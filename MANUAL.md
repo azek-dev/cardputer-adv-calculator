@@ -109,21 +109,27 @@ Read the file on a computer with any microSD card reader. If no card is
 present (or it fails to initialize), the calculator shows `SD ERR` instead
 of a result and continues working normally otherwise.
 
-## Setting the time
+## Setting the time and date
 
-This hardware has no RTC chip, so there's no clock unless you set one —
-either by hand, or over Wi-Fi (see below):
+This hardware has no RTC chip, so there's no clock or calendar unless you
+set one — either by hand, or over Wi-Fi (see below). The time and date are
+completely independent of each other; set either one, both, or neither.
 
 - `timeset(H,M,S)` — set the current time (24-hour, e.g. `timeset(9,30,0)`
   for 9:30:00 AM). This anchors a wall-clock time to the calculator's
   internal uptime timer.
 - `time` — show the current time, computed from that anchor plus elapsed
   time since it was set.
+- `dateset(Y,M,D)` — set the current date (e.g. `dateset(2026,9,13)`).
+  Anchored the same way; month/year rollovers and leap years are handled
+  correctly if the calculator stays awake long enough to cross one.
+- `date` — show the current date (`YYYY-MM-DD`), computed from that anchor.
 
-The clock resets to "unset" every time the calculator loses power — there's
-no battery-backed clock to carry it forward, so run `timeset` again after
-each boot if you want timestamps. Once set, `save` entries are stamped with
-the time they were written, e.g. `---- save #2 (4 entries, RAD) @ 09:47:12 ----`.
+Both reset to "unset" every time the calculator loses power — there's no
+battery-backed clock to carry them forward, so run `timeset`/`dateset`
+again after each boot if you want them. Once set, `save` entries are
+stamped with whichever of the two are currently set, e.g.
+`---- save #2 (4 entries, RAD) @ 2026-09-13 09:47:12 ----`.
 
 ## Reading the SD card without removing it
 
@@ -155,32 +161,44 @@ sleep after **10 minutes** with no key press.
   auto-sleep entirely). Saved to flash, so it persists across power cycles.
 - `sleeptime` (no parens) — show the current timeout.
 
-**Waking up:** press the physical **G0/BtnA button on top** of the device
-— not a keyboard key. It doesn't look like a push-button switch, so it's
-easy to miss if you don't know it's there. The entire keyboard matrix is
-unpowered during sleep, so no ordinary key press can wake it. History and
-settings are saved to flash right before sleeping, same as normal.
+**The physical G0/BtnA button on top** of the device (not a keyboard key)
+does double duty:
 
-## Setting the time via Wi-Fi
+- Press it **during normal use** to sleep immediately, skipping the idle
+  timeout.
+- Press it **while asleep** to wake back up.
 
-If you'd rather not type `timeset` by hand every boot, `wifi(ssid,pass)`
-can fetch the real time over NTP instead — entirely optional, and it never
-asks for Wi-Fi on its own.
+It doesn't look like a push-button switch, so it's easy to miss if you
+don't know it's there. The entire keyboard matrix is unpowered during
+sleep, so no ordinary key press can wake it. History and settings are
+saved to flash right before sleeping, same as normal — and if Wi-Fi
+credentials are saved, waking this way also silently retries an NTP sync
+(a plain power-on never does this on its own).
+
+## Setting the time and date via Wi-Fi
+
+If you'd rather not type `timeset`/`dateset` by hand every boot,
+`wifi(ssid,pass)` can fetch both the real time and date over NTP instead —
+entirely optional, and it never asks for Wi-Fi on its own.
 
 - `wifi(ssid,pass)` — saves the credentials to flash and immediately tries
-  to connect and sync the clock via NTP (hardcoded to JST / UTC+9). Only
-  letters, digits, spaces, hyphens, and underscores can be typed into an
-  SSID or password on this keyboard.
+  to connect and sync the time and date via NTP (hardcoded to JST /
+  UTC+9). Only letters, digits, spaces, hyphens, and underscores can be
+  typed into an SSID or password on this keyboard.
 - `wifi()` — retries using whatever credentials are already saved (e.g.
-  after a reboot, since the clock itself doesn't survive a power cycle but
+  after a reboot, since the clock/calendar don't survive a power cycle but
   the saved Wi-Fi credentials do).
 - `wifi` (no parens) — shows the saved SSID, with no side effects.
 
 If the connection or NTP sync fails, the calculator reports it and leaves
-the clock exactly as it was — nothing breaks, and it's no different from
-not having used `wifi` at all. A connect attempt can take up to ~15
-seconds and Wi-Fi is switched off again immediately afterward either way,
-so it never lingers on in the background.
+the time and date exactly as they were — nothing breaks, and it's no
+different from not having used `wifi` at all. A connect attempt can take
+up to ~15 seconds and Wi-Fi is switched off again immediately afterward
+either way, so it never lingers on in the background.
+
+Waking from sleep via the G0/BtnA button also silently retries this sync
+if credentials are saved (see [Auto-sleep](#auto-sleep)) — a plain
+power-on never does this on its own.
 
 ## Function reference
 

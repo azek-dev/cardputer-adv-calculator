@@ -26,12 +26,14 @@ on the built-in QWERTY keyboard and evaluate them with Enter — like
   power-off, no SD card required
 - Type `save` and press Enter to also export the current history as plain
   text to `calc_log.txt` on a microSD card
-- `timeset(H,M,S)` / `time` — a simple software clock (no RTC chip on this
-  hardware), timestamps `save` entries; resets on power-cycle
+- `timeset(H,M,S)` / `time` and `dateset(Y,M,D)` / `date` — a simple
+  software clock and calendar (no RTC chip on this hardware), set
+  independently of each other, timestamping `save` entries; both reset on
+  power-cycle
 - `wifi(ssid,pass)` — optional, opt-in: saves credentials to flash and
-  syncs the clock via NTP (JST) immediately. `wifi()` retries with saved
-  credentials; bare `wifi` shows what's saved. Never prompts on its own —
-  boot and normal use are unaffected unless you use this
+  syncs both the time and date via NTP (JST) immediately. `wifi()` retries
+  with saved credentials; bare `wifi` shows what's saved. Never prompts on
+  its own — boot and normal use are unaffected unless you use this
 - `usbdrive` — expose the microSD card to a computer over USB as an
   ordinary drive, no card removal needed (requires a reset to return to
   the calculator afterward); `usbdebug` shows the last low-level SD
