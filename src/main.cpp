@@ -894,7 +894,7 @@ static bool ntpSyncViaWifi(const std::string& ssid, const std::string& pass) {
     WiFi.mode(WIFI_STA);
     WiFi.begin(ssid.c_str(), pass.c_str());
 
-    uint32_t deadline = millis() + 15000;
+    uint32_t deadline = millis() + 8000;
     while (WiFi.status() != WL_CONNECTED && millis() < deadline) delay(200);
 
     bool synced = false;
