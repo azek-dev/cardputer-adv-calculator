@@ -5,6 +5,10 @@ built with [PlatformIO](https://platformio.org/). Type math expressions directly
 on the built-in QWERTY keyboard and evaluate them with Enter — like
 `2*sin(pi/4)+sqrt(16)` — with history, editing, and a built-in help screen.
 
+**Just want to install it, no dev environment?** Flash it straight from
+your browser at **[azek-dev.github.io/cardputer-adv-calculator](https://azek-dev.github.io/cardputer-adv-calculator/)**
+— see [INSTALL.md](INSTALL.md) (**[日本語版](INSTALL.ja.md)**) for details.
+
 ## Features
 
 - Full expression parser: `+ - * / ^ % ( )`, unary minus, factorial (`x!`)

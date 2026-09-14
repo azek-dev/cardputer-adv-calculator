@@ -1,0 +1,46 @@
+name: Build and publish firmware
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "platformio.ini"
+      - ".github/workflows/build-firmware.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build firmware
+        run: pio run
+
+      - name: Collect binaries for docs/firmware
+        run: |
+          mkdir -p docs/firmware
+          cp .pio/build/m5stack-stamps3/bootloader.bin docs/firmware/
+          cp .pio/build/m5stack-stamps3/partitions.bin docs/firmware/
+          cp .pio/build/m5stack-stamps3/firmware.bin docs/firmware/
+          BOOT_APP0=$(find "$HOME/.platformio/packages/framework-arduinoespressif32/tools/partitions" -name boot_app0.bin | head -1)
+          cp "$BOOT_APP0" docs/firmware/boot_app0.bin
+
+      - name: Commit updated binaries
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/firmware
+          git diff --cached --quiet || git commit -m "Auto-update flashable firmware binaries [skip ci]"
+          git push

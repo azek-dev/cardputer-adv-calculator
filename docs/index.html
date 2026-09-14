@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cardputer ADV Calculator - かんたんインストール</title>
+<script type="module" src="https://cdn.jsdelivr.net/npm/esp-web-tools@10/dist/web/install-button.js"></script>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f7f7f5;
+    --fg: #1a1a1a;
+    --muted: #5b5b5b;
+    --accent: #1f7a3f;
+    --card: #ffffff;
+    --border: #ddd8cc;
+    --code-bg: #1a1a1a;
+    --code-fg: #7dff9e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14140f;
+      --fg: #eae6d8;
+      --muted: #a5a08e;
+      --accent: #4fd17a;
+      --card: #1d1d16;
+      --border: #33321f;
+      --code-bg: #0a0a08;
+      --code-fg: #7dff9e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "Hiragino Sans", "Helvetica Neue", Arial, sans-serif;
+    line-height: 1.7;
+  }
+  main { max-width: 720px; margin: 0 auto; padding: 32px 20px 80px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 28px; font-size: 0.95rem; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 22px;
+    margin-bottom: 20px;
+  }
+  h2 { font-size: 1.05rem; margin: 0 0 10px; }
+  ol, ul { padding-left: 1.3em; margin: 8px 0; }
+  li { margin: 4px 0; }
+  code {
+    background: var(--code-bg);
+    color: var(--code-fg);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.85em;
+  }
+  pre {
+    background: var(--code-bg);
+    color: var(--code-fg);
+    padding: 12px 14px;
+    border-radius: 8px;
+    overflow-x: auto;
+    font-size: 0.82rem;
+  }
+  esp-web-install-button {
+    display: block;
+    margin: 18px 0 6px;
+  }
+  .warn {
+    border-left: 3px solid #c99a1f;
+    padding: 8px 12px;
+    background: rgba(201,154,31,0.1);
+    border-radius: 0 8px 8px 0;
+    font-size: 0.9rem;
+  }
+  a { color: var(--accent); }
+  .lang-toggle { font-size: 0.85rem; margin-bottom: 24px; }
+  footer { color: var(--muted); font-size: 0.8rem; margin-top: 40px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Cardputer ADV Calculator</h1>
+  <p class="sub">M5Stack Cardputer / Cardputer ADV 用 関数電卓ファームウェア — かんたんインストール</p>
+
+  <div class="card">
+    <h2>方法1: ブラウザから書き込む(推奨)</h2>
+    <p>PCに何もインストールせず、ブラウザだけで書き込めます。</p>
+    <div class="warn">対応ブラウザ: <strong>Chrome</strong> または <strong>Edge</strong>(Web Serial API が必要)。Safari / Firefox では動作しません。</div>
+    <ol>
+      <li>Cardputer ADV を USB Type-C ケーブルで PC に接続する</li>
+      <li>下のボタンを押す → 表示されるリストから接続したデバイスのポートを選ぶ → <code>INSTALL</code> を押す</li>
+      <li>書き込みが終わったら自動的に再起動し、電卓画面が表示されます</li>
+    </ol>
+    <esp-web-install-button manifest="manifest.json">
+      <button slot="activate" style="font-size:1rem;padding:10px 18px;border-radius:8px;border:1px solid var(--border);background:var(--accent);color:#fff;cursor:pointer;">
+        ここをクリックして書き込む
+      </button>
+      <span slot="unsupported">お使いのブラウザは対応していません。Chrome または Edge で開いてください。</span>
+      <span slot="not-allowed">この機能を使うには https 接続が必要です。</span>
+    </esp-web-install-button>
+    <p style="font-size:0.85rem;color:var(--muted);">
+      2回目以降のアップデートでも、保存済みの履歴・Wi-Fi設定・時刻設定は消えません(設定用の記憶領域は書き換え対象外のため)。
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>方法2: esptool.py で手動書き込み</h2>
+    <p>Web Serial が使えない環境向けの代替手段です。Python が必要です。</p>
+    <ol>
+      <li>
+        <a href="firmware/bootloader.bin">bootloader.bin</a> /
+        <a href="firmware/partitions.bin">partitions.bin</a> /
+        <a href="firmware/boot_app0.bin">boot_app0.bin</a> /
+        <a href="firmware/firmware.bin">firmware.bin</a>
+        の4ファイルを同じフォルダにダウンロードする
+      </li>
+      <li>esptool をインストールする: <code>pip install esptool</code></li>
+      <li>Cardputer ADV を USB Type-C で接続し、接続されたシリアルポート名を確認する
+        (Mac: <code>ls /dev/cu.usbmodem*</code> / Windows: デバイスマネージャーで <code>COM*</code> を確認)</li>
+      <li>以下のコマンドを実行する(<code>&lt;PORT&gt;</code> は自分の環境のポート名に置き換える):</li>
+    </ol>
+    <pre>python -m esptool --chip esp32s3 --port &lt;PORT&gt; --baud 460800 \
+  --before default_reset --after hard_reset write_flash -z \
+  --flash_mode dio --flash_freq 80m --flash_size 8MB \
+  0x0000 bootloader.bin \
+  0x8000 partitions.bin \
+  0xe000 boot_app0.bin \
+  0x10000 firmware.bin</pre>
+  </div>
+
+  <div class="card">
+    <h2>使い方</h2>
+    <p>
+      書き込み後は、キーボードで数式(例: <code>2*sin(pi/4)+sqrt(16)</code>)を入力して
+      Enter で計算できます。詳しい使い方は
+      <a href="https://github.com/azek-dev/cardputer-adv-calculator/blob/main/MANUAL.ja.md">操作マニュアル</a>
+      を参照してください。
+    </p>
+  </div>
+
+  <footer>
+    <a href="https://github.com/azek-dev/cardputer-adv-calculator">ソースコード(GitHub)</a> ・ MIT License
+  </footer>
+</main>
+</body>
+</html>
