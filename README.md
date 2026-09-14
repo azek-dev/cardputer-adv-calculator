@@ -46,6 +46,8 @@ your browser at **[azek-dev.github.io/cardputer-adv-calculator](https://azek-dev
   deep sleep rather than a true power-off); wake with the physical
   G0/BtnA side button. `sleeptime(n)` changes the timeout in minutes
   (0 disables it); bare `sleeptime` shows the current setting
+- `battery` — battery level (%) and voltage; `uptime` — time since the
+  last boot/wake (resets on sleep, like the clock)
 
 ## Keys
 

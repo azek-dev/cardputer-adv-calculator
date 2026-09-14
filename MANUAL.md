@@ -193,12 +193,25 @@ entirely optional, and it never asks for Wi-Fi on its own.
 If the connection or NTP sync fails, the calculator reports it and leaves
 the time and date exactly as they were — nothing breaks, and it's no
 different from not having used `wifi` at all. A connect attempt can take
-up to ~15 seconds and Wi-Fi is switched off again immediately afterward
+up to ~8 seconds and Wi-Fi is switched off again immediately afterward
 either way, so it never lingers on in the background.
 
 Waking from sleep via the G0/BtnA button also silently retries this sync
 if credentials are saved (see [Auto-sleep](#auto-sleep)) — a plain
 power-on never does this on its own.
+
+## Battery and uptime
+
+- `battery` — shows the battery level as a percentage and the raw
+  voltage, e.g. `battery: 82% (4.05V)`. This board has no dedicated
+  fuel-gauge chip, so the level is read directly from the battery
+  voltage — treat it as an estimate, not an exact reading. There's also
+  no charge-status pin wired up (it charges directly through the Stamp
+  S3 module), so charging/not-charging can't be reported here.
+- `uptime` — shows how long it's been since the last boot or wake from
+  sleep, e.g. `2d 03:12:45`. Like the clock, this resets to zero every
+  time the device sleeps and wakes (or is power-cycled) — it's not a
+  lifetime usage counter.
 
 ## Function reference
 

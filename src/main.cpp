@@ -438,6 +438,7 @@ static const std::vector<std::vector<std::string>> helpPages = {
     {"USB drive mode:", "usbdrive exposes the SD", "card to a computer over", "USB. Needs reset/power-", "cycle to return to the", "calculator afterward.", "usbdebug shows why it", "failed, after a reset."},
     {"Auto-sleep (no PMIC, so", "this is deep sleep, not a", "real power-off):", "sleeptime(n) sets n min", "sleeptime shows current", "G0/BtnA (top button) also", "sleeps/wakes on demand;", "wake retries saved wifi"},
     {"Wifi time sync (opt-in,", "never asked automatically):", "wifi(ssid,pass) saves +", "syncs via NTP (JST)", "wifi() retries saved creds", "wifi shows saved SSID"},
+    {"Battery & uptime:", "battery = level %/volts", "uptime = time since last", "  boot/wake (resets on", "  sleep, like the clock)"},
     {"Keys:", "fn+BkSp = clear all", "fn+;/.  = history up/down", "fn+,//  = cursor left/right", "opt+D   = deg/rad toggle", "Tab     = complete func name"},
 };
 
@@ -1255,6 +1256,36 @@ static void evaluate() {
         cursorPos = 0;
         return;
     }
+    if (equalsIgnoreCase(expr, "battery")) {
+        // No charge-status pin is wired on this board (it charges directly
+        // through the Stamp S3 module), so M5Unified can't report
+        // charging/not-charging here — level and voltage only.
+        int32_t level = M5Cardputer.Power.getBatteryLevel();
+        int16_t mv = M5Cardputer.Power.getBatteryVoltage();
+        char buf[48];
+        if (level < 0) snprintf(buf, sizeof(buf), "battery: unavailable");
+        else snprintf(buf, sizeof(buf), "battery: %ld%% (%.2fV)", (long)level, mv / 1000.0f);
+        resultLine = buf;
+        expr.clear();
+        haveResult = true;
+        browseIndex = -1;
+        cursorPos = 0;
+        return;
+    }
+    if (equalsIgnoreCase(expr, "uptime")) {
+        uint32_t totalSeconds = millis() / 1000;
+        uint32_t days = totalSeconds / 86400;
+        int32_t secOfDay = (int32_t)(totalSeconds % 86400);
+        char buf[32];
+        if (days > 0) snprintf(buf, sizeof(buf), "%lud %s", (unsigned long)days, formatHMS(secOfDay).c_str());
+        else snprintf(buf, sizeof(buf), "%s", formatHMS(secOfDay).c_str());
+        resultLine = buf;
+        expr.clear();
+        haveResult = true;
+        browseIndex = -1;
+        cursorPos = 0;
+        return;
+    }
     try {
         Parser p(expr, degMode);
         double v = p.run();
@@ -1467,7 +1498,7 @@ static void handleBackspace() {
 // Names Tab-completion will offer, i.e. everything applyIdentifier()
 // recognizes plus the "help" command.
 static const std::vector<std::string> FUNCTION_NAMES = {
-    "pi", "e", "ans", "help", "save", "time", "timeset", "date", "dateset", "usbdrive", "usbdebug", "sleeptime", "wifi",
+    "pi", "e", "ans", "help", "save", "time", "timeset", "date", "dateset", "usbdrive", "usbdebug", "sleeptime", "wifi", "battery", "uptime",
     "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
     "tanh", "sinh", "cosh", "asinh", "acosh", "atanh",
     "sqrt", "cbrt", "pow", "exp", "log", "ln", "log2",
@@ -1479,7 +1510,7 @@ static const std::vector<std::string> FUNCTION_NAMES = {
 // Words that stand alone (no argument list), so Tab shouldn't add "(".
 static bool isBareWord(const std::string& w) {
     return w == "pi" || w == "e" || w == "ans" || w == "help" || w == "save" || w == "time" || w == "date" ||
-           w == "usbdrive" || w == "usbdebug" || w == "sleeptime" || w == "wifi";
+           w == "usbdrive" || w == "usbdebug" || w == "sleeptime" || w == "wifi" || w == "battery" || w == "uptime";
 }
 
 // Tab-completion state: which span of `expr` is being cycled, and which
