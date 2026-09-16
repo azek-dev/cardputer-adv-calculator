@@ -86,15 +86,14 @@
 #include <Preferences.h>
 #include <SPI.h>
 #include <SD.h>
-#include <USB.h>
-#include <USBMSC.h>
-#include <esp_sleep.h>
-#include <WiFi.h>
 #include <cmath>
 #include <vector>
 #include <string>
 #include <algorithm>
 #include <utility>
+#include <CardputerClock.h>
+#include <CardputerUsbDrive.h>
+#include <CardputerSleep.h>
 
 static M5Canvas canvas(&M5Cardputer.Display);
 static const int LINE_H = 12;   // px per text line at text size 1
@@ -107,307 +106,17 @@ static const int SD_SPI_MISO_PIN = 39;
 static const int SD_SPI_MOSI_PIN = 14;
 static const int SD_SPI_CS_PIN = 12;
 static const char* SD_LOG_PATH = "/calc_log.txt";
+static const uint32_t SD_SECTOR_SIZE = 512; // must match CardputerUsbDrive's own sector size
 static bool sdReady = false;
 static uint32_t sdSectorCount = 0; // populated at boot while SD.h has it mounted
 
 static Preferences prefs;
 static const char* PREFS_NS = "calc";
 
-// ---------------------------------------------------------------------
-// USB Mass Storage: exposes the microSD card directly to a host computer
-// over USB, without going through this sketch's normal FAT-mounted SD.h
-// access. Needs raw sector-level SD-over-SPI I/O (a different protocol
-// layer from SD.h/SdFat), adapted from the MIT-licensed reference noted
-// above. Once entered (via the "usbdrive" command), the calculator no
-// longer functions until reset — this mirrors the reference design and
-// avoids the two very different SD access layers running at once.
-// ---------------------------------------------------------------------
-static const uint32_t MSC_SECTOR_SIZE = 512;
-static USBMSC MSC;
-static SPIClass mscSPI(HSPI);
-static bool mscCardIsHC = false;
-static bool mscModeActive = false;
-
-// Diagnostics for usbdrive: USB CDC/serial disappears the instant MSC
-// mode enumerates, so Serial.printf can't be read live — record the last
-// low-level SD failure to NVS instead, retrievable after a reset via the
-// "usbdebug" command. Cheap (only writes on a failure path) and handy if
-// a particular SD card turns out to be flaky/incompatible.
-static void mscDebugLog(const char* tag, uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
-    Preferences p;
-    p.begin("mscdbg", false);
-    p.putUInt("n", p.getUInt("n", 0) + 1);
-    p.putString("tag", tag);
-    p.putUInt("a", a);
-    p.putUInt("b", b);
-    p.putUInt("c", c);
-    p.putUInt("d", d);
-    p.end();
-}
-
-static uint8_t mscSdTransfer(uint8_t b) { return mscSPI.transfer(b); }
-
-static void mscSdSelect() {
-    digitalWrite(SD_SPI_CS_PIN, LOW);
-    delayMicroseconds(1);
-}
-
-static void mscSdDeselect() {
-    digitalWrite(SD_SPI_CS_PIN, HIGH);
-    mscSPI.transfer(0xFF);
-}
-
-static uint8_t mscSdCmd(uint8_t cmd, uint32_t arg) {
-    mscSdDeselect();
-    mscSdTransfer(0xFF);
-    mscSdSelect();
-
-    mscSdTransfer(0x40 | cmd);
-    mscSdTransfer((arg >> 24) & 0xFF);
-    mscSdTransfer((arg >> 16) & 0xFF);
-    mscSdTransfer((arg >> 8) & 0xFF);
-    mscSdTransfer(arg & 0xFF);
-
-    uint8_t crc = 0xFF;
-    if (cmd == 0) crc = 0x95;
-    if (cmd == 8) crc = 0x87;
-    mscSdTransfer(crc);
-
-    uint8_t r = 0xFF;
-    for (int i = 0; i < 8; i++) {
-        r = mscSdTransfer(0xFF);
-        if (!(r & 0x80)) break;
-    }
-    return r;
-}
-
-// Re-initializes the SD card at the raw SPI protocol level (independent
-// of SD.h's FAT mount, which must already be released via SD.end()).
-static bool mscSdRawInit() {
-    mscCardIsHC = false;
-    mscSPI.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
-    mscSdDeselect();
-    for (int i = 0; i < 20; i++) mscSdTransfer(0xFF);
-
-    // The card was just handed over from SD.h's own driver, which may
-    // leave it mid-transaction; CMD0 often needs a few tries before the
-    // card actually drops into SPI idle state in that situation.
-    bool idle = false;
-    for (int attempt = 0; attempt < 10 && !idle; attempt++) {
-        idle = (mscSdCmd(0, 0) == 0x01);
-        if (!idle) delay(10);
-    }
-    if (!idle) {
-        mscSPI.endTransaction();
-        return false;
-    }
-
-    bool v2 = false;
-    if (mscSdCmd(8, 0x000001AA) == 0x01) {
-        uint8_t r7[4];
-        for (int i = 0; i < 4; i++) r7[i] = mscSdTransfer(0xFF);
-        if (r7[2] == 0x01 && r7[3] == 0xAA) v2 = true;
-    }
-
-    uint32_t deadline = millis() + 2000;
-    uint8_t r;
-    do {
-        mscSdCmd(55, 0);
-        r = mscSdCmd(41, v2 ? 0x40000000 : 0);
-        if (millis() > deadline) {
-            mscSPI.endTransaction();
-            return false;
-        }
-    } while (r != 0x00);
-
-    // For v2+ cards we must positively confirm HC/XC (block-addressed) vs.
-    // SDSC (byte-addressed) — guessing wrong silently corrupts every read
-    // past the first sector, so treat a failed OCR read as a hard error
-    // instead of quietly defaulting to SDSC addressing.
-    if (v2) {
-        if (mscSdCmd(58, 0) != 0x00) {
-            mscSPI.endTransaction();
-            return false;
-        }
-        uint8_t ocr[4];
-        for (int i = 0; i < 4; i++) ocr[i] = mscSdTransfer(0xFF);
-        mscCardIsHC = (ocr[0] & 0x40) != 0;
-    }
-
-    if (!mscCardIsHC && mscSdCmd(16, MSC_SECTOR_SIZE) != 0x00) {
-        mscSPI.endTransaction();
-        return false;
-    }
-
-    mscSdDeselect();
-    mscSPI.endTransaction();
-    return true;
-}
-
-static bool mscReadSectors(uint8_t* buf, uint32_t lba, uint32_t count) {
-    mscSPI.beginTransaction(SPISettings(20000000, MSBFIRST, SPI_MODE0));
-    for (uint32_t i = 0; i < count; i++) {
-        uint32_t addr = mscCardIsHC ? (lba + i) : ((lba + i) * MSC_SECTOR_SIZE);
-
-        mscSdDeselect();
-        mscSdTransfer(0xFF);
-        mscSdSelect();
-        mscSdTransfer(0x40 | 17);
-        mscSdTransfer((addr >> 24) & 0xFF);
-        mscSdTransfer((addr >> 16) & 0xFF);
-        mscSdTransfer((addr >> 8) & 0xFF);
-        mscSdTransfer(addr & 0xFF);
-        mscSdTransfer(0xFF);
-
-        uint8_t r1 = 0xFF;
-        for (int t = 0; t < 10; t++) {
-            r1 = mscSdTransfer(0xFF);
-            if (!(r1 & 0x80)) break;
-        }
-        if (r1 != 0x00) {
-            mscSdDeselect();
-            mscSPI.endTransaction();
-            mscDebugLog("rd_cmd17", r1, lba + i, addr, mscCardIsHC ? 1 : 0);
-            return false;
-        }
-
-        uint8_t token = 0xFF;
-        uint32_t dl = millis() + 500;
-        while (millis() < dl) {
-            token = mscSdTransfer(0xFF);
-            if (token != 0xFF) break;
-        }
-        if (token != 0xFE) {
-            mscSdDeselect();
-            mscSPI.endTransaction();
-            mscDebugLog("rd_token", token, lba + i, addr, mscCardIsHC ? 1 : 0);
-            return false;
-        }
-
-        for (uint32_t b = 0; b < MSC_SECTOR_SIZE; b++) buf[i * MSC_SECTOR_SIZE + b] = mscSdTransfer(0xFF);
-        mscSdTransfer(0xFF);
-        mscSdTransfer(0xFF);
-        mscSdDeselect();
-    }
-    mscSPI.endTransaction();
-    return true;
-}
-
-static bool mscWriteSectors(const uint8_t* buf, uint32_t lba, uint32_t count) {
-    mscSPI.beginTransaction(SPISettings(20000000, MSBFIRST, SPI_MODE0));
-    for (uint32_t i = 0; i < count; i++) {
-        uint32_t addr = mscCardIsHC ? (lba + i) : ((lba + i) * MSC_SECTOR_SIZE);
-
-        mscSdDeselect();
-        mscSdTransfer(0xFF);
-        mscSdSelect();
-        mscSdTransfer(0x40 | 24);
-        mscSdTransfer((addr >> 24) & 0xFF);
-        mscSdTransfer((addr >> 16) & 0xFF);
-        mscSdTransfer((addr >> 8) & 0xFF);
-        mscSdTransfer(addr & 0xFF);
-        mscSdTransfer(0xFF);
-
-        uint8_t r1 = 0xFF;
-        for (int t = 0; t < 10; t++) {
-            r1 = mscSdTransfer(0xFF);
-            if (!(r1 & 0x80)) break;
-        }
-        if (r1 != 0x00) {
-            mscSdDeselect();
-            mscSPI.endTransaction();
-            mscDebugLog("wr_cmd24", r1, lba + i, addr, mscCardIsHC ? 1 : 0);
-            return false;
-        }
-
-        mscSdTransfer(0xFF);
-        mscSdTransfer(0xFE);
-        for (uint32_t b = 0; b < MSC_SECTOR_SIZE; b++) mscSdTransfer(buf[i * MSC_SECTOR_SIZE + b]);
-        mscSdTransfer(0xFF);
-        mscSdTransfer(0xFF);
-
-        uint8_t dresp = mscSdTransfer(0xFF);
-        if ((dresp & 0x1F) != 0x05) {
-            mscSdDeselect();
-            mscSPI.endTransaction();
-            mscDebugLog("wr_dresp", dresp, lba + i, addr, mscCardIsHC ? 1 : 0);
-            return false;
-        }
-
-        uint32_t dl = millis() + 2000;
-        while (millis() < dl) {
-            if (mscSdTransfer(0xFF) != 0x00) break;
-        }
-        mscSdDeselect();
-    }
-    mscSPI.endTransaction();
-    return true;
-}
-
-static int32_t mscOnRead(uint32_t lba, uint32_t offset, void* buffer, uint32_t bufsize) {
-    uint32_t count = bufsize / MSC_SECTOR_SIZE;
-    if (count == 0 || offset != 0) {
-        mscDebugLog("rd_reject", lba, offset, bufsize, 0);
-        return -1;
-    }
-    bool ok = mscReadSectors((uint8_t*)buffer, lba, count);
-    // (mscReadSectors already logs the specific failure reason/sector)
-    return ok ? (int32_t)bufsize : -1;
-}
-
-static int32_t mscOnWrite(uint32_t lba, uint32_t offset, uint8_t* buffer, uint32_t bufsize) {
-    uint32_t count = bufsize / MSC_SECTOR_SIZE;
-    if (count == 0 || offset != 0) {
-        mscDebugLog("wr_reject", lba, offset, bufsize, 0);
-        return -1;
-    }
-    bool ok = mscWriteSectors(buffer, lba, count);
-    // (mscWriteSectors already logs the specific failure reason/sector)
-    return ok ? (int32_t)bufsize : -1;
-}
-
-static bool mscOnStartStop(uint8_t power_condition, bool start, bool load_eject) {
-    (void)power_condition;
-    (void)start;
-    (void)load_eject;
-    return true;
-}
-
-// Hands the SD card over to the host computer as a USB drive. Returns
-// false (leaving normal calculator operation untouched) if there's no
-// card or the raw protocol handshake fails.
-static bool enterUsbDriveMode() {
-    if (!sdReady || sdSectorCount == 0) return false;
-
-    SD.end(); // release the FAT mount before raw sector access begins
-    SPI.end(); // and fully free the peripheral/GPIO-matrix routing it held
-               // on these same pins, or mscSPI's own routing gets corrupted
-    delay(20);
-    pinMode(SD_SPI_CS_PIN, OUTPUT);
-    mscSPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
-
-    if (!mscSdRawInit()) {
-        mscDebugLog("raw_init_fail", 0, 0, 0, 0);
-        return false;
-    }
-    mscDebugLog("raw_init_ok", mscCardIsHC ? 1 : 0, sdSectorCount, 0, 0);
-
-    MSC.vendorID("CalcCard");
-    MSC.productID("Cardputer");
-    MSC.productRevision("1.0");
-    MSC.onRead(mscOnRead);
-    MSC.onWrite(mscOnWrite);
-    MSC.onStartStop(mscOnStartStop);
-    MSC.mediaPresent(true);
-    MSC.begin(sdSectorCount, MSC_SECTOR_SIZE);
-
-    USB.manufacturerName("CardputerCalc");
-    USB.productName("SD Card");
-    USB.begin();
-
-    mscModeActive = true;
-    return true;
-}
+// USB Mass Storage (exposes the microSD card to a host computer as an
+// ordinary USB drive) and the underlying raw SD-over-SPI I/O now live in
+// the shared CardputerUsbDrive library — see cardputer-common.
+static CardputerUsbDrive usbDrive;
 
 struct HistEntry {
     std::string expr;
@@ -450,11 +159,10 @@ static const size_t HISTORY_STORE_CAP = 20;
 // startup in setup() from the actual display size (see historyDisplayCap).
 static size_t historyDisplayCap = 4;
 
-// Deep-sleep-on-idle. 0 = disabled. Loaded from / saved to flash so the
-// setting survives a power cycle.
-static uint32_t idleSleepMinutes = 10;
-static uint32_t lastActivityMillis = 0;
+// Idle-timeout deep sleep (no PMIC on this board) now lives in the shared
+// CardputerSleep library — see cardputer-common.
 static const int WAKE_BUTTON_PIN = 0; // G0 / BtnA, the side button
+static CardputerSleep sleepMgr;
 
 // ---------------------------------------------------------------------
 // Recursive-descent expression parser / evaluator
@@ -828,129 +536,9 @@ static bool startsWithIgnoreCase(const std::string& a, const char* prefix) {
     return true;
 }
 
-// ---------------------------------------------------------------------
-// Software clock: this hardware has no RTC chip, so there's no time (or
-// date) source unless the user sets one — either manually (timeset()/
-// dateset()) or, if Wi-Fi credentials have been saved (wifi()), via NTP,
-// which sets both at once. Time-of-day and the date are tracked
-// independently, each anchored to millis() when it was set; either can
-// be set without the other. Resets to "unset" on every power-cycle
-// (Wi-Fi credentials themselves persist in flash; the clock does not).
-// ---------------------------------------------------------------------
-static bool timeSet = false;
-static uint32_t timeBaseMillis = 0;
-static int32_t timeBaseSeconds = 0;
-static bool dateSet = false;
-static uint32_t dateBaseMillis = 0;
-static int dateBaseYear = 1970, dateBaseMonth = 1, dateBaseDay = 1;
-static std::string wifiSsid;
-static std::string wifiPass;
-
-static int32_t currentTimeSeconds() {
-    uint32_t elapsedMs = millis() - timeBaseMillis; // unsigned wraparound-safe
-    int32_t total = (timeBaseSeconds + (int32_t)(elapsedMs / 1000)) % 86400;
-    if (total < 0) total += 86400;
-    return total;
-}
-
-static std::string formatHMS(int32_t totalSeconds) {
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%02d:%02d:%02d", (int)(totalSeconds / 3600),
-             (int)((totalSeconds % 3600) / 60), (int)(totalSeconds % 60));
-    return std::string(buf);
-}
-
-// Projects the date forward by however many whole days have elapsed
-// since dateset()/wifi() last set it, via mktime/localtime so month/year
-// rollover and leap years are handled correctly instead of hand-rolled.
-static void currentDateYMD(int& y, int& m, int& d) {
-    uint32_t elapsedMs = millis() - dateBaseMillis; // unsigned wraparound-safe
-    int32_t daysElapsed = (int32_t)(elapsedMs / 86400000UL);
-
-    struct tm t = {};
-    t.tm_year = dateBaseYear - 1900;
-    t.tm_mon = dateBaseMonth - 1;
-    t.tm_mday = dateBaseDay;
-    t.tm_hour = 12; // noon: keeps this well away from any DST edge case
-    time_t base = mktime(&t);
-    time_t now = base + (time_t)daysElapsed * 86400;
-    struct tm* r = localtime(&now);
-    y = r->tm_year + 1900;
-    m = r->tm_mon + 1;
-    d = r->tm_mday;
-}
-
-static std::string formatYMD(int y, int m, int d) {
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%04d-%02d-%02d", y, m, d);
-    return std::string(buf);
-}
-
-// Connects to Wi-Fi, fetches the time over NTP, and sets the software
-// clock from it — hardcoded to JST (UTC+9, no DST). Wi-Fi is always
-// switched off again afterward, win or lose, so it never lingers on
-// between calculations. Returns false (clock left untouched) on any
-// failure: bad credentials, no AP in range, or no NTP reply in time.
-static bool ntpSyncViaWifi(const std::string& ssid, const std::string& pass) {
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(ssid.c_str(), pass.c_str());
-
-    uint32_t deadline = millis() + 8000;
-    while (WiFi.status() != WL_CONNECTED && millis() < deadline) delay(200);
-
-    bool synced = false;
-    if (WiFi.status() == WL_CONNECTED) {
-        configTime(9 * 3600, 0, "pool.ntp.org", "time.google.com");
-        struct tm timeinfo;
-        if (getLocalTime(&timeinfo, 10000)) {
-            timeBaseSeconds = timeinfo.tm_hour * 3600 + timeinfo.tm_min * 60 + timeinfo.tm_sec;
-            timeBaseMillis = millis();
-            timeSet = true;
-            dateBaseYear = timeinfo.tm_year + 1900;
-            dateBaseMonth = timeinfo.tm_mon + 1;
-            dateBaseDay = timeinfo.tm_mday;
-            dateBaseMillis = millis();
-            dateSet = true;
-            synced = true;
-        }
-    }
-
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_OFF);
-    return synced;
-}
-
-// Parses "name(a,b,c)" (the part in parens) into three integers — used
-// by both timeset(H,M,S) and dateset(Y,M,D).
-static bool parseThreeIntArgs(const std::string& s, int& h, int& m, int& sec) {
-    size_t open = s.find('(');
-    size_t close = s.rfind(')');
-    if (open == std::string::npos || close == std::string::npos || close <= open) return false;
-    std::string inner = s.substr(open + 1, close - open - 1);
-
-    int vals[3];
-    int count = 0;
-    size_t pos = 0;
-    while (count < 3) {
-        size_t comma = inner.find(',', pos);
-        std::string tok = (comma == std::string::npos) ? inner.substr(pos) : inner.substr(pos, comma - pos);
-        size_t a = tok.find_first_not_of(' ');
-        size_t b = tok.find_last_not_of(' ');
-        if (a == std::string::npos) return false;
-        tok = tok.substr(a, b - a + 1);
-        if (tok.empty()) return false;
-        for (char c : tok)
-            if (!std::isdigit((unsigned char)c)) return false;
-        vals[count++] = atoi(tok.c_str());
-        if (comma == std::string::npos) break;
-        pos = comma + 1;
-    }
-    if (count != 3) return false;
-    h = vals[0];
-    m = vals[1];
-    sec = vals[2];
-    return true;
-}
+// Software clock (no RTC on this hardware) and Wi-Fi/NTP sync now live in
+// the shared CardputerClock library — see cardputer-common.
+static CardputerClock clock_;
 
 // ---------------------------------------------------------------------
 // Persistence: history + settings auto-saved to internal flash (NVS),
@@ -959,7 +547,6 @@ static bool parseThreeIntArgs(const std::string& s, int& h, int& m, int& sec) {
 static void saveStateToFlash() {
     prefs.begin(PREFS_NS, false);
     prefs.putBool("deg", degMode);
-    prefs.putUInt("sleepmin", idleSleepMinutes);
     prefs.putUInt("hn", (uint32_t)history.size());
     for (size_t i = 0; i < history.size(); i++) {
         char key[12];
@@ -973,21 +560,9 @@ static void saveStateToFlash() {
     prefs.end();
 }
 
-// Wi-Fi credentials are saved separately from saveStateToFlash() — that
-// one runs after every calculation, and these change far less often.
-static void saveWifiToFlash() {
-    prefs.begin(PREFS_NS, false);
-    prefs.putString("wssid", wifiSsid.c_str());
-    prefs.putString("wpass", wifiPass.c_str());
-    prefs.end();
-}
-
 static void loadStateFromFlash() {
     prefs.begin(PREFS_NS, true);
     degMode = prefs.getBool("deg", false);
-    idleSleepMinutes = prefs.getUInt("sleepmin", 10);
-    wifiSsid = prefs.getString("wssid", "").c_str();
-    wifiPass = prefs.getString("wpass", "").c_str();
     uint32_t n = prefs.getUInt("hn", 0);
     history.clear();
     for (uint32_t i = 0; i < n && i < HISTORY_STORE_CAP; i++) {
@@ -1004,32 +579,6 @@ static void loadStateFromFlash() {
     prefs.end();
 }
 
-// No PMIC on this board (see the file header), so deep sleep is the
-// closest available thing to "power off". Only the physical G0/BtnA side
-// button can wake it — the keyboard matrix itself is unpowered during
-// sleep, so no ordinary key works. Never returns.
-static void enterDeepSleep() {
-    saveStateToFlash();
-
-    canvas.fillSprite(TFT_BLACK);
-    canvas.setTextSize(1);
-    canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
-    canvas.setCursor(2, 2);
-    canvas.print("Sleeping (idle timeout)");
-    canvas.setTextColor(TFT_WHITE, TFT_BLACK);
-    canvas.setCursor(2, TOP_Y);
-    canvas.print("Press the G0/BtnA side");
-    canvas.setCursor(2, TOP_Y + LINE_H);
-    canvas.print("button to wake up.");
-    canvas.pushSprite(0, 0);
-    delay(800); // let the message actually reach the screen before dimming
-    M5Cardputer.Display.setBrightness(0);
-
-    pinMode(WAKE_BUTTON_PIN, INPUT_PULLUP);
-    esp_sleep_enable_ext0_wakeup((gpio_num_t)WAKE_BUTTON_PIN, 0); // wake on LOW
-    esp_deep_sleep_start();
-}
-
 // Appends the current in-memory history to /calc_log.txt on the SD card
 // as a labeled block, so re-running "save" doesn't overwrite older saves.
 static bool saveHistoryToSD() {
@@ -1043,13 +592,11 @@ static bool saveHistoryToSD() {
     prefs.end();
 
     std::string tsSuffix;
-    if (dateSet) {
-        int y, m, d;
-        currentDateYMD(y, m, d);
-        tsSuffix += " @ " + formatYMD(y, m, d);
-        if (timeSet) tsSuffix += " " + formatHMS(currentTimeSeconds());
-    } else if (timeSet) {
-        tsSuffix = " @ " + formatHMS(currentTimeSeconds());
+    if (clock_.isDateSet()) {
+        tsSuffix += " @ " + clock_.dateString();
+        if (clock_.isTimeSet()) tsSuffix += " " + clock_.timeString();
+    } else if (clock_.isTimeSet()) {
+        tsSuffix = " @ " + clock_.timeString();
     }
     f.printf("---- save #%u (%u entries, %s)%s ----\n", (unsigned)saveNum,
               (unsigned)history.size(), degMode ? "DEG" : "RAD", tsSuffix.c_str());
@@ -1083,7 +630,7 @@ static void evaluate() {
         return;
     }
     if (equalsIgnoreCase(expr, "time")) {
-        resultLine = timeSet ? formatHMS(currentTimeSeconds()) : "Time not set (timeset(H,M,S))";
+        resultLine = clock_.isTimeSet() ? clock_.timeString() : "Time not set (timeset(H,M,S))";
         expr.clear();
         haveResult = true;
         browseIndex = -1;
@@ -1092,11 +639,8 @@ static void evaluate() {
     }
     if (startsWithIgnoreCase(expr, "timeset(") && !expr.empty() && expr.back() == ')') {
         int h, m, s;
-        if (parseThreeIntArgs(expr, h, m, s) && h >= 0 && h < 24 && m >= 0 && m < 60 && s >= 0 && s < 60) {
-            timeBaseSeconds = h * 3600 + m * 60 + s;
-            timeBaseMillis = millis();
-            timeSet = true;
-            resultLine = "Time set to " + formatHMS(timeBaseSeconds);
+        if (CardputerClock::parseThreeIntArgs(expr, h, m, s) && clock_.setTime(h, m, s)) {
+            resultLine = "Time set to " + clock_.timeString();
         } else {
             resultLine = "ERR: timeset(H,M,S) 0-23,0-59,0-59";
         }
@@ -1107,13 +651,7 @@ static void evaluate() {
         return;
     }
     if (equalsIgnoreCase(expr, "date")) {
-        int y, m, d;
-        if (dateSet) {
-            currentDateYMD(y, m, d);
-            resultLine = formatYMD(y, m, d);
-        } else {
-            resultLine = "Date not set (dateset(Y,M,D))";
-        }
+        resultLine = clock_.isDateSet() ? clock_.dateString() : "Date not set (dateset(Y,M,D))";
         expr.clear();
         haveResult = true;
         browseIndex = -1;
@@ -1122,13 +660,8 @@ static void evaluate() {
     }
     if (startsWithIgnoreCase(expr, "dateset(") && !expr.empty() && expr.back() == ')') {
         int y, m, d;
-        if (parseThreeIntArgs(expr, y, m, d) && y >= 2000 && y <= 2099 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
-            dateBaseYear = y;
-            dateBaseMonth = m;
-            dateBaseDay = d;
-            dateBaseMillis = millis();
-            dateSet = true;
-            resultLine = "Date set to " + formatYMD(y, m, d);
+        if (CardputerClock::parseThreeIntArgs(expr, y, m, d) && clock_.setDate(y, m, d)) {
+            resultLine = "Date set to " + clock_.dateString();
         } else {
             resultLine = "ERR: dateset(Y,M,D) e.g. dateset(2026,9,13)";
         }
@@ -1140,7 +673,7 @@ static void evaluate() {
     }
     if (equalsIgnoreCase(expr, "wifi")) {
         // Status only, no side effects: never blocks or touches the radio.
-        resultLine = wifiSsid.empty() ? "no wifi saved (wifi(ssid,pass))" : ("saved: " + wifiSsid + " (wifi() to sync)");
+        resultLine = clock_.hasSavedWifi() ? ("saved: " + clock_.savedSsid() + " (wifi() to sync)") : "no wifi saved (wifi(ssid,pass))";
         expr.clear();
         haveResult = true;
         browseIndex = -1;
@@ -1153,22 +686,21 @@ static void evaluate() {
         std::string inner = expr.substr(open + 1, close - open - 1);
         if (inner.empty()) {
             // wifi(): retry with whatever is already saved.
-            if (wifiSsid.empty()) {
+            if (!clock_.hasSavedWifi()) {
                 resultLine = "ERR: no saved wifi (use wifi(ssid,pass))";
             } else {
-                resultLine = ntpSyncViaWifi(wifiSsid, wifiPass) ? ("Time synced: " + formatHMS(currentTimeSeconds()))
-                                                                  : "Wifi/NTP failed (time unchanged)";
+                resultLine = clock_.wifiRetry() ? ("Time synced: " + clock_.timeString())
+                                                 : "Wifi/NTP failed (time unchanged)";
             }
         } else {
             size_t comma = inner.find(',');
             if (comma == std::string::npos) {
                 resultLine = "ERR: wifi(ssid,pass)";
             } else {
-                wifiSsid = inner.substr(0, comma);
-                wifiPass = inner.substr(comma + 1);
-                saveWifiToFlash(); // kept even if the sync below fails
-                resultLine = ntpSyncViaWifi(wifiSsid, wifiPass) ? ("Time synced: " + formatHMS(currentTimeSeconds()))
-                                                                  : "Saved. Wifi/NTP failed (time unchanged)";
+                std::string ssid = inner.substr(0, comma);
+                std::string pass = inner.substr(comma + 1);
+                resultLine = clock_.wifiSync(ssid, pass) ? ("Time synced: " + clock_.timeString())
+                                                          : "Saved. Wifi/NTP failed (time unchanged)";
             }
         }
         expr.clear();
@@ -1180,8 +712,9 @@ static void evaluate() {
     if (equalsIgnoreCase(expr, "usbdrive")) {
         // Only reachable via the calculator UI, which renders its own
         // screen right up until this call, so haveResult/render() here
-        // don't matter once mscModeActive flips loop()/render() over.
-        if (!enterUsbDriveMode()) {
+        // don't matter once usbDrive.isActive() flips loop()/render() over.
+        usbDrive.setSdInfo(sdReady, sdSectorCount);
+        if (!usbDrive.enter()) {
             resultLine = "SD ERR (no card?)";
             expr.clear();
             haveResult = true;
@@ -1191,23 +724,9 @@ static void evaluate() {
         return;
     }
     if (equalsIgnoreCase(expr, "usbdebug")) {
-        // Shows the last mscDebugLog() entry recorded during a usbdrive
+        // Shows the last low-level SD failure recorded during a usbdrive
         // session — useful if usbdrive fails on a particular SD card.
-        Preferences dbg;
-        dbg.begin("mscdbg", true);
-        uint32_t n = dbg.getUInt("n", 0);
-        if (n == 0) {
-            resultLine = "no msc debug data";
-        } else {
-            std::string tag = dbg.getString("tag", "").c_str();
-            char buf[64];
-            snprintf(buf, sizeof(buf), "%s a=%lu b=%lu c=%lu d=%lu n=%lu", tag.c_str(),
-                     (unsigned long)dbg.getUInt("a", 0), (unsigned long)dbg.getUInt("b", 0),
-                     (unsigned long)dbg.getUInt("c", 0), (unsigned long)dbg.getUInt("d", 0),
-                     (unsigned long)n);
-            resultLine = buf;
-        }
-        dbg.end();
+        resultLine = CardputerUsbDrive::lastDebugInfo();
         expr.clear();
         haveResult = true;
         browseIndex = -1;
@@ -1216,8 +735,9 @@ static void evaluate() {
     }
     if (equalsIgnoreCase(expr, "sleeptime")) {
         char buf[48];
-        if (idleSleepMinutes == 0) snprintf(buf, sizeof(buf), "auto-sleep disabled");
-        else snprintf(buf, sizeof(buf), "auto-sleep after %lu min", (unsigned long)idleSleepMinutes);
+        uint32_t mins = sleepMgr.idleMinutes();
+        if (mins == 0) snprintf(buf, sizeof(buf), "auto-sleep disabled");
+        else snprintf(buf, sizeof(buf), "auto-sleep after %lu min", (unsigned long)mins);
         resultLine = buf;
         expr.clear();
         haveResult = true;
@@ -1240,12 +760,11 @@ static void evaluate() {
         for (char c : inner)
             if (!std::isdigit((unsigned char)c)) valid = false;
         long n = valid && !inner.empty() ? atol(inner.c_str()) : -1;
-        if (valid && n >= 0 && n <= 1440) {
-            idleSleepMinutes = (uint32_t)n;
-            saveStateToFlash();
+        if (valid && n >= 0 && n <= 1440 && sleepMgr.setIdleMinutes((uint32_t)n)) {
             char buf[48];
-            if (idleSleepMinutes == 0) snprintf(buf, sizeof(buf), "auto-sleep disabled");
-            else snprintf(buf, sizeof(buf), "auto-sleep after %lu min", (unsigned long)idleSleepMinutes);
+            uint32_t mins = sleepMgr.idleMinutes();
+            if (mins == 0) snprintf(buf, sizeof(buf), "auto-sleep disabled");
+            else snprintf(buf, sizeof(buf), "auto-sleep after %lu min", (unsigned long)mins);
             resultLine = buf;
         } else {
             resultLine = "ERR: sleeptime(0-1440)";
@@ -1277,8 +796,8 @@ static void evaluate() {
         uint32_t days = totalSeconds / 86400;
         int32_t secOfDay = (int32_t)(totalSeconds % 86400);
         char buf[32];
-        if (days > 0) snprintf(buf, sizeof(buf), "%lud %s", (unsigned long)days, formatHMS(secOfDay).c_str());
-        else snprintf(buf, sizeof(buf), "%s", formatHMS(secOfDay).c_str());
+        if (days > 0) snprintf(buf, sizeof(buf), "%lud %s", (unsigned long)days, CardputerClock::formatHMS(secOfDay).c_str());
+        else snprintf(buf, sizeof(buf), "%s", CardputerClock::formatHMS(secOfDay).c_str());
         resultLine = buf;
         expr.clear();
         haveResult = true;
@@ -1368,7 +887,7 @@ static void renderUsbDriveScreen() {
 }
 
 static void render() {
-    if (mscModeActive) {
+    if (usbDrive.isActive()) {
         renderUsbDriveScreen();
         return;
     }
@@ -1584,26 +1103,27 @@ void setup() {
     if (historyDisplayCap < 1) historyDisplayCap = 1;
 
     loadStateFromFlash(); // restore history + DEG/RAD from before power-off
-    lastActivityMillis = millis();
+    clock_.begin();       // restore saved Wi-Fi credentials (not the clock itself)
+    sleepMgr.begin(WAKE_BUTTON_PIN);
 
     // SD card is optional: the calculator works fine without one, "save"
     // just reports an error until a card is present.
     SPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
     sdReady = SD.begin(SD_SPI_CS_PIN, SPI, 25000000);
-    if (sdReady) sdSectorCount = (uint32_t)(SD.totalBytes() / MSC_SECTOR_SIZE);
-
-    pinMode(WAKE_BUTTON_PIN, INPUT_PULLUP); // also read as a plain button below, not just as a sleep wake source
+    if (sdReady) sdSectorCount = (uint32_t)(SD.totalBytes() / SD_SECTOR_SIZE);
+    usbDrive.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN,
+                   "CalcCard", "Cardputer", "1.0", "CardputerCalc", "SD Card");
 
     // Only right after waking from deep sleep via the G0 button — never on
     // a plain power-on — silently retry a saved Wi-Fi sync, since that's
     // exactly when the software clock has just been wiped.
-    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0 && !wifiSsid.empty()) {
+    if (sleepMgr.wokenByButton() && clock_.hasSavedWifi()) {
         canvas.fillSprite(TFT_BLACK);
         canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
         canvas.setCursor(2, 2);
         canvas.print("Syncing time via Wi-Fi...");
         canvas.pushSprite(0, 0);
-        ntpSyncViaWifi(wifiSsid, wifiPass); // best-effort; failure just leaves the clock unset
+        clock_.wifiRetry(); // best-effort; failure just leaves the clock unset
     }
 
     render();
@@ -1614,7 +1134,7 @@ static bool wordHas(const Keyboard_Class::KeysState& s, char c) {
 }
 
 void loop() {
-    if (mscModeActive) {
+    if (usbDrive.isActive()) {
         // The SD card now belongs entirely to the raw MSC callbacks; do
         // nothing at all here, not even redraw the display — the display
         // is also SPI, and any activity on it while a raw SD transaction
@@ -1624,24 +1144,21 @@ void loop() {
         return;
     }
 
-    if (idleSleepMinutes > 0 && millis() - lastActivityMillis > idleSleepMinutes * 60000UL) {
-        enterDeepSleep(); // never returns
+    if (sleepMgr.idleTimeoutReached()) {
+        sleepMgr.enterDeepSleep(saveStateToFlash); // never returns
     }
 
     // G0/BtnA also works as an immediate manual sleep button, not just as
     // the wake source: press it any time to skip the idle timeout.
-    static bool g0PrevHigh = true;
-    bool g0Now = digitalRead(WAKE_BUTTON_PIN) == LOW;
-    if (g0Now && g0PrevHigh) {
-        enterDeepSleep(); // never returns
+    if (sleepMgr.buttonPressedEdge()) {
+        sleepMgr.enterDeepSleep(saveStateToFlash); // never returns
     }
-    g0PrevHigh = !g0Now;
 
     M5Cardputer.update();
 
     if (M5Cardputer.Keyboard.isChange()) {
         if (M5Cardputer.Keyboard.isPressed()) {
-            lastActivityMillis = millis();
+            sleepMgr.noteActivity();
             Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
 
             // This library's `fn`/`opt` are plain modifier flags: holding

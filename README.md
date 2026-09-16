@@ -83,6 +83,11 @@ Cardputer and Cardputer ADV at runtime.
 
 ## Credits
 
+The Wi-Fi/NTP clock, USB Mass Storage, and deep-sleep code live in the
+shared [cardputer-common](https://github.com/azek-dev/cardputer-common)
+library, split out so other Cardputer projects can reuse the same
+hardware-tested code.
+
 The raw SD-over-SPI block I/O routines behind the `usbdrive` command are
 adapted from [MOY-lightening-firmware/M5-cardputer-mass-storage](https://github.com/MOY-lightening-firmware/M5-cardputer-mass-storage)
 (MIT License, Copyright (c) 2026 OZAN).

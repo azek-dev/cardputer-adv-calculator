@@ -207,7 +207,12 @@ power-on never does this on its own.
   fuel-gauge chip, so the level is read directly from the battery
   voltage — treat it as an estimate, not an exact reading. There's also
   no charge-status pin wired up (it charges directly through the Stamp
-  S3 module), so charging/not-charging can't be reported here.
+  S3 module), so charging/not-charging can't be reported here. While a
+  USB-C cable is connected (especially while charging), the reading can
+  be well off from the actual cell state — e.g. showing 100%/4.19V right
+  after waking with USB still plugged in — since the ADC is reading the
+  charger-influenced voltage, not a true battery gauge. For the most
+  accurate reading, check it on battery power alone.
 - `uptime` — shows how long it's been since the last boot or wake from
   sleep, e.g. `2d 03:12:45`. Like the clock, this resets to zero every
   time the device sleeps and wakes (or is power-cycled) — it's not a
