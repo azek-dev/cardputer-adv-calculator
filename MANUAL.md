@@ -93,6 +93,45 @@ adding `(`. Pressing any other key ends the completion cycle.
 (`sin cos tan asin acos atan atan2`). The current mode is shown in the
 top-left corner: `[DEG]` or `[RAD]`.
 
+## Drawing a graph
+
+Type `plot(expression, xmin, xmax)` and press `Enter` to fill the screen
+with the curve. `x` inside the expression is the horizontal variable.
+
+```
+plot(2*x-2, -10, 10)
+plot(sin(x), 0, 2*pi)
+plot(x*x-4, -5, 5)
+```
+
+- `Enter` or `Backspace` — return to the calculator
+
+**The vertical range** fits itself to what was drawn. Pass five arguments to
+set it yourself.
+
+```
+plot(sin(x), 0, 2*pi, -2, 2)
+```
+
+The bottom line shows the `x` and `y` ranges in use, and the `x = 0` and
+`y = 0` lines are drawn in faint grey when they fall on screen.
+
+**`x` means something only inside `plot()`.** Writing it in an ordinary
+expression gives `ERR: x only inside plot()`. The range arguments, on the
+other hand, are full expressions, which is what lets
+`plot(sin(x), 0, 2*pi)` use `pi`.
+
+**Points that can't be drawn are skipped**: `x = 0` in `plot(1/x, -5, 5)`,
+or the negative half of `plot(sqrt(x), -2, 4)`. The line simply breaks
+there, which is what stops a curve with an asymptote from drawing a
+full-height streak. If no point at all can be drawn, the graph doesn't open
+and an error is shown instead — that is how a typo in the expression
+surfaces.
+
+**Sampling** is one evaluation per screen column, so 240 points across the
+range. A function that oscillates faster than that is only drawn where the
+samples land.
+
 ## On-device help
 
 Type `help` and press `Enter` to open a scrollable function reference on
@@ -317,6 +356,14 @@ result depending on the mode — both are shown below.
 |---|---|---|
 | `ans` | Most recent result | `ans*2` |
 | `ans(n)` | n-th most recent result (1 = last) | `ans(1)+ans(2)+ans(3)` (sum of the last 3 results) |
+
+### Graphs
+
+| Function | Description | Example |
+|---|---|---|
+| `plot(expr,xmin,xmax)` | Draws the curve, fitting the y range | `plot(2*x-2,-10,10)` |
+| `plot(expr,xmin,xmax,ymin,ymax)` | Sets the y range too | `plot(sin(x),0,2*pi,-2,2)` |
+| `x` | The horizontal variable, valid only inside `plot()` | `plot(x*x,-3,3)` |
 
 ### Constants and operators
 

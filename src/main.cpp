@@ -135,6 +135,16 @@ static size_t cursorPos = 0;      // insert/delete position within `expr`
 
 static bool helpMode = false;
 static int helpPage = 0;
+
+// Graph screen. plot(expr, xmin, xmax) keeps the expression as text and
+// re-evaluates it once per screen column with `x` set to that column's
+// value, so `x` only means anything inside plot().
+static bool plotMode = false;
+static std::string plotExpr;
+static double plotXmin = 0, plotXmax = 0;
+static double plotYmin = 0, plotYmax = 0;
+static std::vector<float> plotSamples; // one per column, left to right
+static std::vector<char> plotValid;    // 0 = nothing to draw in that column
 static const std::vector<std::vector<std::string>> helpPages = {
     {"Trig & hyperbolic:", "sin cos tan atan2 (opt+D", " toggles deg/rad)",
      "sinh cosh tanh", "asinh acosh atanh", "ex: sin(pi/2)=1  tanh(1)=.76"},
@@ -144,6 +154,7 @@ static const std::vector<std::vector<std::string>> helpPages = {
     {"Combinatorics & rounding:", "ncr(n,r) npr(n,r)", "rand() rand(lo,hi)",
      "randint(lo,hi) inclusive", "abs floor ceil round int", "pi e x! ^ %", "ex: randint(1,6)=dice"},
     {"Previous results:", "ans = most recent result", "ans(n) = n-th most recent", "ex: ans(1)+ans(2)+ans(3)"},
+    {"Graphs:", "plot(expr,xmin,xmax) draws", "  the curve; x is the", "  variable (only here)", "y range auto-fits, or give", "  plot(e,x0,x1,y0,y1)", "ex: plot(2*x-2,-10,10)", "Enter/BkSp exits the graph"},
     {"Saving:", "History auto-saves to flash", "(survives power off, no SD", "card needed).", "Type save + Enter to also", "append it to calc_log.txt", "on a microSD card."},
     {"Clock (no RTC on this", "board, resets each boot):", "timeset(H,M,S) / time", "dateset(Y,M,D) / date", "ex: timeset(9,30,0)", "ex: dateset(2026,9,13)"},
     {"USB drive mode:", "usbdrive exposes the SD", "card to a computer over", "USB. Needs reset/power-", "cycle to return to the", "calculator afterward.", "usbdebug shows why it", "failed, after a reset."},
@@ -179,7 +190,10 @@ private:
 
 class Parser {
 public:
-    Parser(const std::string& s, bool deg) : src(s), pos(0), useDegrees(deg) {}
+    // `xVar` is non-null only while plotting, which is what makes `x` a
+    // variable there and an error everywhere else.
+    Parser(const std::string& s, bool deg, const double* xVar = nullptr)
+        : src(s), pos(0), useDegrees(deg), xVar(xVar) {}
 
     double run() {
         double v = parseExpr();
@@ -192,6 +206,7 @@ private:
     const std::string& src;
     size_t pos;
     bool useDegrees; // named to avoid clashing with Arduino's degrees() macro
+    const double* xVar;
 
     void skipSpaces() { while (pos < src.size() && src[pos] == ' ') pos++; }
 
@@ -389,6 +404,10 @@ private:
     double applyIdentifier(const std::string& id) {
         if (id == "pi") return M_PI;
         if (id == "e") return M_E;
+        if (id == "x") {
+            if (!xVar) throw ParseError("x only inside plot()");
+            return *xVar;
+        }
 
         if (id == "ans") {
             // Bare `ans` = most recent result; `ans(n)` = n-th most
@@ -403,6 +422,11 @@ private:
             if (n < 1 || n > (int)history.size()) throw ParseError("no such ans");
             return history[history.size() - n].value;
         }
+
+        // A bare word that isn't pi/e/x/ans has to be a function call, so
+        // report the name rather than letting parseArgs say "expected (" --
+        // which is what a mistyped variable inside plot() used to look like.
+        if (peek() != '(') throw ParseError("unknown name or missing (");
 
         std::vector<double> args = parseArgs();
         auto arg1 = [&]() -> double {
@@ -542,6 +566,31 @@ static std::string formatNumber(double v) {
     return std::string(buf);
 }
 
+// Axis labels have a whole range to fit on one 40-character line, so they
+// get far fewer digits than a result does.
+static std::string shortNum(double v) {
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%.4g", v);
+    return buf;
+}
+
+// Splits on the commas that separate plot()'s own arguments, ignoring any
+// inside nested parentheses so the expression argument can hold a call of
+// its own (atan2(x,2) and the like).
+static std::vector<std::string> splitTopLevel(const std::string& s) {
+    std::vector<std::string> out;
+    std::string cur;
+    int depth = 0;
+    for (char c : s) {
+        if (c == '(') depth++;
+        else if (c == ')') depth--;
+        if (c == ',' && depth == 0) { out.push_back(cur); cur.clear(); continue; }
+        cur += c;
+    }
+    out.push_back(cur);
+    return out;
+}
+
 static bool equalsIgnoreCase(const std::string& a, const char* b) {
     size_t i = 0;
     for (; i < a.size() && b[i]; i++) {
@@ -631,6 +680,52 @@ static bool saveHistoryToSD() {
     return true;
 }
 
+// Samples `body` once per screen column with `x` swept from xmin to xmax.
+// A column that can't produce a finite value (a domain error, an asymptote)
+// is left marked invalid rather than aborting the whole plot -- that is what
+// keeps tan(x) from drawing a full-height streak where it blows up. Returns
+// false only when no column at all worked, which is also how a typo in the
+// expression surfaces.
+static bool buildPlot(const std::string& body, double xmin, double xmax, int columns,
+                      bool haveYRange, double ymin, double ymax, std::string& err) {
+    if (columns < 2) { err = "screen too narrow"; return false; }
+    plotSamples.assign(columns, 0.0f);
+    plotValid.assign(columns, 0);
+    int okCount = 0;
+    double lo = 0, hi = 0;
+    for (int i = 0; i < columns; i++) {
+        double xv = xmin + (xmax - xmin) * (double)i / (double)(columns - 1);
+        double yv;
+        try {
+            Parser p(body, degMode, &xv);
+            yv = p.run();
+        } catch (const std::exception& ex) {
+            err = ex.what();
+            continue;
+        }
+        if (!std::isfinite(yv)) { err = "not finite"; continue; }
+        plotSamples[i] = (float)yv;
+        plotValid[i] = 1;
+        if (okCount == 0) { lo = hi = yv; }
+        else { lo = std::min(lo, yv); hi = std::max(hi, yv); }
+        okCount++;
+    }
+    if (okCount == 0) return false;
+    if (haveYRange) {
+        plotYmin = ymin;
+        plotYmax = ymax;
+    } else if (hi - lo < 1e-12) {
+        // A flat line would otherwise give a zero-height window.
+        plotYmin = lo - 1.0;
+        plotYmax = hi + 1.0;
+    } else {
+        double margin = (hi - lo) * 0.05;
+        plotYmin = lo - margin;
+        plotYmax = hi + margin;
+    }
+    return true;
+}
+
 static void evaluate() {
     if (expr.empty()) return;
     if (equalsIgnoreCase(expr, "help")) {
@@ -639,6 +734,50 @@ static void evaluate() {
         expr.clear();
         resultLine.clear();
         haveResult = false;
+        browseIndex = -1;
+        cursorPos = 0;
+        return;
+    }
+    if (startsWithIgnoreCase(expr, "plot(") && expr.back() == ')') {
+        std::vector<std::string> fields = splitTopLevel(expr.substr(5, expr.size() - 6));
+        std::string err;
+        if (fields.size() != 3 && fields.size() != 5) {
+            resultLine = "ERR: plot(expr,xmin,xmax[,ymin,ymax])";
+        } else {
+            // Only the range arguments are evaluated here; fields[0] stays
+            // as text for buildPlot to re-evaluate per column.
+            double num[4] = {0, 0, 0, 0};
+            bool numsOk = true;
+            for (size_t i = 1; i < fields.size(); i++) {
+                try {
+                    Parser p(fields[i], degMode);
+                    num[i - 1] = p.run();
+                } catch (const std::exception& ex) {
+                    err = ex.what();
+                    numsOk = false;
+                    break;
+                }
+            }
+            bool haveY = fields.size() == 5;
+            if (!numsOk) {
+                resultLine = "ERR: " + err;
+            } else if (!(num[0] < num[1])) {
+                resultLine = "ERR: need xmin < xmax";
+            } else if (haveY && !(num[2] < num[3])) {
+                resultLine = "ERR: need ymin < ymax";
+            } else if (!buildPlot(fields[0], num[0], num[1], canvas.width(),
+                                  haveY, num[2], num[3], err)) {
+                resultLine = "ERR: " + (err.empty() ? std::string("nothing to plot") : err);
+            } else {
+                plotExpr = fields[0];
+                plotXmin = num[0];
+                plotXmax = num[1];
+                plotMode = true;
+                resultLine.clear();
+            }
+        }
+        expr.clear();
+        haveResult = !resultLine.empty();
         browseIndex = -1;
         cursorPos = 0;
         return;
@@ -940,6 +1079,50 @@ static void render() {
         return;
     }
 
+    if (plotMode) {
+        int gy0 = TOP_Y;
+        int gy1 = h - LINE_H - 4;
+        int gh = gy1 - gy0;
+        int gw = canvas.width();
+
+        canvas.setTextColor(TFT_GREEN, TFT_BLACK);
+        canvas.setCursor(2, 2);
+        canvas.print(("y=" + plotExpr).c_str());
+
+        // The zero lines go down first so the curve draws over them.
+        if (plotYmin < 0 && plotYmax > 0) {
+            int zy = gy1 - (int)((0 - plotYmin) / (plotYmax - plotYmin) * gh);
+            canvas.drawFastHLine(0, zy, gw, TFT_DARKGREY);
+        }
+        if (plotXmin < 0 && plotXmax > 0) {
+            int zx = (int)((0 - plotXmin) / (plotXmax - plotXmin) * (gw - 1));
+            canvas.drawFastVLine(zx, gy0, gh, TFT_DARKGREY);
+        }
+
+        // A segment is drawn only when both of its ends are inside the y
+        // window, so the line breaks at an asymptote instead of jumping
+        // from one edge of the screen to the other.
+        int n = (int)plotSamples.size();
+        if (n > gw) n = gw;
+        for (int i = 1; i < n; i++) {
+            bool okA = plotValid[i - 1] && plotSamples[i - 1] >= plotYmin && plotSamples[i - 1] <= plotYmax;
+            bool okB = plotValid[i] && plotSamples[i] >= plotYmin && plotSamples[i] <= plotYmax;
+            if (!okA || !okB) continue;
+            int ya = gy1 - (int)((plotSamples[i - 1] - plotYmin) / (plotYmax - plotYmin) * gh);
+            int yb = gy1 - (int)((plotSamples[i] - plotYmin) / (plotYmax - plotYmin) * gh);
+            canvas.drawLine(i - 1, ya, i, yb, TFT_YELLOW);
+        }
+
+        canvas.setTextColor(TFT_DARKGREY, TFT_BLACK);
+        canvas.setCursor(2, h - LINE_H - 2);
+        canvas.printf("x %s..%s y %s..%s Ent:exit",
+                      shortNum(plotXmin).c_str(), shortNum(plotXmax).c_str(),
+                      shortNum(plotYmin).c_str(), shortNum(plotYmax).c_str());
+
+        canvas.pushSprite(0, 0);
+        return;
+    }
+
     canvas.setTextColor(TFT_GREEN, TFT_BLACK);
     canvas.setCursor(2, 2);
     canvas.printf("Adv Calc  [%s]", degMode ? "DEG" : "RAD");
@@ -1047,6 +1230,7 @@ static const std::vector<std::string> FUNCTION_NAMES = {
     "abs", "floor", "ceil", "round", "int",
     "mod", "min", "max", "clamp", "gcd", "lcm", "ncr", "npr",
     "rand", "randint",
+    "plot",
 };
 
 // Words that stand alone (no argument list), so Tab shouldn't add "(".
@@ -1192,6 +1376,14 @@ void loop() {
             bool fnDown = status.fn && wordHas(status, '.');
             bool fnLeft = status.fn && wordHas(status, ',');
             bool fnRight = status.fn && wordHas(status, '/');
+
+            if (plotMode) {
+                // Nothing to page through, so Enter/Backspace just return
+                // to the calculator; every other key is ignored.
+                if (status.enter || status.del) plotMode = false;
+                render();
+                return;
+            }
 
             if (helpMode) {
                 // While the help screen is up, fn+;/. flips pages and

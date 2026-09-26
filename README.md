@@ -19,6 +19,8 @@ your browser at **[azek-dev.github.io/cardputer-adv-calculator](https://azek-dev
   comparison/integer (`min max clamp gcd lcm mod`), combinatorics
   (`ncr npr`), random (`rand randint`)
 - Constants: `pi`, `e`
+- Graphs: `plot(2*x-2, -10, 10)` draws the curve on the screen, with `x`
+  as the variable and an auto-fitting y range
 - `ans` / `ans(n)` — reuse the most recent result(s) in a new expression
   (e.g. `ans(1)+ans(2)+ans(3)`)
 - DEG/RAD toggle (`opt+D`)
