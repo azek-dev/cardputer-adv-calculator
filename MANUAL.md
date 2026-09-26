@@ -29,6 +29,26 @@ after they scroll off screen.
 The `|` character shown while typing marks the cursor position — you're not
 limited to editing from the end of the line.
 
+## Scientific notation
+
+An `e` straight after a number starts its exponent.
+
+```
+6.022e23         =>  6.022e+23
+1e-6             =>  0.000001
+1+3e-1           =>  1.3
+```
+
+The `e` has to be followed by digits (a sign is allowed). When nothing
+follows it, that `e` isn't read as an exponent, so **`e` as the constant
+still works**.
+
+```
+2*e              =>  5.4365636569  (2 x 2.71828...)
+2*e-1            =>  4.4365636569
+ln(e)            =>  1
+```
+
 ## After you get a result
 
 Once `= ...` is showing, the next key you press decides what happens:

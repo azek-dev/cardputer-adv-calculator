@@ -91,6 +91,7 @@
 #include <string>
 #include <algorithm>
 #include <utility>
+#include <cstdlib>
 #include <CardputerClock.h>
 #include <CardputerUsbDrive.h>
 #include <CardputerSleep.h>
@@ -147,6 +148,7 @@ static std::vector<char> plotValid;    // 0 = nothing to draw in that column
 static const std::vector<std::vector<std::string>> helpPages = {
     {"Trig & hyperbolic:", "sin cos tan atan2 (opt+D", " toggles deg/rad)",
      "sinh cosh tanh", "asinh acosh atanh", "ex: sin(pi/2)=1  tanh(1)=.76"},
+    {"Number entry:", "digits and . as usual", "6.022e23 and 1e-6 work", "(an e right after a number", " is its exponent; e on its", " own is Euler's number)"},
     {"Power/log & compare:", "sqrt cbrt pow(x,y)", "exp log ln log2(x)",
      "min max clamp(x,lo,hi)", "gcd lcm mod(a,b)", "ex: pow(2,10)=1024", "ex: gcd(12,18)=6"},
     {"Combinatorics & rounding:", "ncr(n,r) npr(n,r)", "rand() rand(lo,hi)",
@@ -308,7 +310,28 @@ private:
         while (pos < src.size() && (std::isdigit((unsigned char)src[pos]) || src[pos] == '.'))
             pos++;
         if (pos == start) throw ParseError("bad number");
-        return std::stod(src.substr(start, pos - start));
+        // An exponent suffix, but only when it really is one: `e` or `E`
+        // followed by digits, optionally signed. Anything else puts the
+        // position back, which is what keeps `e` available as Euler's
+        // number -- `2*e` and `2*e-1` must go on meaning what they did.
+        if (pos < src.size() && (src[pos] == 'e' || src[pos] == 'E')) {
+            size_t beforeExponent = pos;
+            pos++;
+            if (pos < src.size() && (src[pos] == '+' || src[pos] == '-')) pos++;
+            if (pos < src.size() && std::isdigit((unsigned char)src[pos])) {
+                while (pos < src.size() && std::isdigit((unsigned char)src[pos])) pos++;
+            } else {
+                pos = beforeExponent;
+            }
+        }
+        std::string text = src.substr(start, pos - start);
+        const char* begin = text.c_str();
+        char* end = nullptr;
+        double v = std::strtod(begin, &end);
+        // std::stod would take "2..3" by stopping at the second dot and
+        // returning 2; requiring the whole token to be consumed rejects it.
+        if (end != begin + text.size()) throw ParseError("bad number");
+        return v;
     }
 
     std::string parseIdent() {

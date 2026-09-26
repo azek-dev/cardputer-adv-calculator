@@ -11,7 +11,8 @@ your browser at **[azek-dev.github.io/cardputer-adv-calculator](https://azek-dev
 
 ## Features
 
-- Full expression parser: `+ - * / ^ % ( )`, unary minus, factorial (`x!`)
+- Full expression parser: `+ - * / ^ % ( )`, unary minus, factorial (`x!`),
+  scientific notation (`6.022e23`, `1e-6`)
 - Functions: trig (`sin cos tan asin acos atan atan2`), hyperbolic
   (`sinh cosh tanh asinh acosh atanh`), power/log
   (`sqrt cbrt pow log ln log2 exp`), rounding (`abs floor ceil round int`),
