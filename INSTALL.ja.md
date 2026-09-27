@@ -39,6 +39,40 @@ Web Serial が使えない環境(Firefox など)向けの代替手段です。Py
      0x10000 firmware.bin
    ```
 
+## 両方の電卓を入れて `switch` で切り替える
+
+この基板は8MBフラッシュで、パーティションテーブルにアプリ領域が最初から2つあります
+(`app0` = 0x10000、`app1` = 0x340000、どちらも3.19MB)。ファームウェアは1つ約1.06MBなので、
+RPN電卓と代数式電卓を同時に本体に入れておき、電卓内で `switch` + Enter と打つだけで
+切り替えられます(約1秒で再起動して、もう一方が立ち上がります)。焼き直しは不要です。
+
+1. 2つのファームウェアを別名で用意する:
+   - この代数式電卓: [firmware.bin](docs/firmware/firmware.bin) を `rpn.bin` / `adv.bin` の
+     対応する名前で保存
+   - RPN電卓: [cardputer-rpn-calculator の firmware.bin](https://github.com/azek-dev/cardputer-rpn-calculator/raw/main/docs/firmware/firmware.bin) を保存
+2. 方法2と同じ手順で、最後のコマンドだけ次のようにする(`<PORT>` は自分のポート名):
+   ```bash
+   python -m esptool --chip esp32s3 --port <PORT> --baud 460800 \
+     --before default_reset --after hard_reset write_flash -z \
+     --flash_mode dio --flash_freq 80m --flash_size 8MB \
+     0x0000 bootloader.bin \
+     0x8000 partitions.bin \
+     0xe000 boot_app0.bin \
+     0x10000 rpn.bin \
+     0x340000 adv.bin
+   ```
+   `0xe000` の boot_app0.bin は「まず app0 を起動する」という指定なので、書き込み直後は
+   `0x10000` に入れたほう(この例ではRPN電卓)が起動します。どちらをどのスロットに
+   入れても構いません。以降は `switch` で行き来できます。
+
+片方だけ入れ替えたいときは、そのスロットのオフセットだけ指定して焼きます
+(`0x10000 rpn.bin` だけ、あるいは `0x340000 adv.bin` だけ)。**PlatformIO の
+`pio run -t upload` は常に app0 に書き込む**ので、app1 側にいる電卓を更新するときは
+上のように esptool でオフセットを明示してください。
+
+保存データは衝突しません。スタックや履歴はそれぞれ別のNVS名前空間(`rpn` と `calc`)に
+入るので独立して残り、Wi-Fi認証情報とスリープ時間の設定は共有されます。
+
 ## 書き込み後の使い方
 
 キーボードで数式(例: `2*sin(pi/4)+sqrt(16)`)を入力して Enter で計算できます。

@@ -29,6 +29,10 @@ your browser at **[azek-dev.github.io/cardputer-adv-calculator](https://azek-dev
 - Cursor-based editing (`fn+,` / `fn+/`) — not just backspace-from-the-end
 - Tab-completion for function names (press again to cycle multiple matches)
 - On-device help screen — type `help` and press Enter
+- `switch` — reboot into the
+  [RPN calculator](https://github.com/azek-dev/cardputer-rpn-calculator). The
+  8MB flash has two app slots, so both calculators can stay on the device and
+  you can move between them without reflashing (see [INSTALL.md](INSTALL.md))
 - History and DEG/RAD setting auto-save to internal flash and survive
   power-off, no SD card required
 - Type `save` and press Enter to also export the current history as plain
