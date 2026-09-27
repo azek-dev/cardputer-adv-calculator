@@ -259,6 +259,24 @@ Waking from sleep via the G0/BtnA button also silently retries this sync
 if credentials are saved (see [Auto-sleep](#auto-sleep)) — a plain
 power-on never does this on its own.
 
+## Switching between the two calculators
+
+- `switch` — reboots into the other calculator (RPN ⇔ algebraic). Takes about
+  a second.
+
+This board's partition table has two app slots (`app0`/`app1`, 3.19MB each)
+and each firmware is only about 1.06MB, so both calculators can sit on the
+device at once. `switch` only changes which slot the bootloader starts and
+reboots; it never writes anything. If the other slot is empty it reports
+`ERR: other slot is empty` and does nothing, so a device with just one
+calculator flashed can't be left unable to boot.
+
+The stack and the history live in separate NVS namespaces, so going over and
+coming back restores what you left. The Wi-Fi credentials and the sleep
+timeout are shared between the two.
+
+See [INSTALL.md](INSTALL.md) for how to flash both.
+
 ## Battery and uptime
 
 - `battery` — shows the battery level as a percentage and the raw
