@@ -272,6 +272,19 @@ power-on never does this on its own.
   after waking with USB still plugged in — since the ADC is reading the
   charger-influenced voltage, not a true battery gauge. For the most
   accurate reading, check it on battery power alone.
+- `BATT LOW` — once the voltage falls below 3.1 V, a red `BATT LOW` appears
+  next to the title at the top of the screen. **It only warns; the
+  calculator never shuts itself down or goes to sleep because of it** —
+  taking the device away from you on the strength of an imprecise voltage,
+  while the cell may well still have usable charge, would be the wrong
+  trade. As noted above the voltage is read straight off the ADC, sags
+  under load and moves by tens of millivolts between samples, so the
+  warning appears only after three consecutive five-second readings below
+  3.1 V, and clears only above 3.25 V (the gap keeps it from flickering
+  around the threshold). While USB is connected the ADC sees the charger's
+  voltage, so the warning normally stays off. When it does appear, charge
+  the device soon: 3.0 V is the LiPo discharge floor, and repeatedly going
+  below it degrades the cell.
 - `uptime` — shows how long it's been since the last boot or wake from
   sleep, e.g. `2d 03:12:45`. Like the clock, this resets to zero every
   time the device sleeps and wakes (or is power-cycled) — it's not a
