@@ -1348,9 +1348,14 @@ static const std::vector<std::string> FUNCTION_NAMES = {
 };
 
 // Words that stand alone (no argument list), so Tab shouldn't add "(".
+// Names Tab must NOT follow with an auto-opened "(", because they are used
+// on their own. Every command evaluate() matches as a whole word belongs
+// here: completing one to "name(" makes it unrecognizable, and Enter then
+// fails inside the parser instead of running the command.
 static bool isBareWord(const std::string& w) {
     return w == "pi" || w == "e" || w == "ans" || w == "help" || w == "save" || w == "time" || w == "date" ||
-           w == "usbdrive" || w == "usbdebug" || w == "sleeptime" || w == "wifi" || w == "battery" || w == "uptime";
+           w == "usbdrive" || w == "usbdebug" || w == "sleeptime" || w == "wifi" || w == "battery" ||
+           w == "uptime" || w == "switch";
 }
 
 // Tab-completion state: which span of `expr` is being cycled, and which
