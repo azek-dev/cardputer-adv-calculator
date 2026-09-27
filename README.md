@@ -55,6 +55,8 @@ your browser at **[azek-dev.github.io/cardputer-adv-calculator](https://azek-dev
   (0 disables it); bare `sleeptime` shows the current setting
 - `battery` — battery level (%) and voltage; `uptime` — time since the
   last boot/wake (resets on sleep, like the clock)
+- A red `BATT LOW` appears beside the title below 3.1 V. It warns only —
+  nothing is ever shut down on the strength of an imprecise voltage reading
 
 ## Keys
 

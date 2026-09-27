@@ -163,7 +163,7 @@ static const std::vector<std::vector<std::string>> helpPages = {
     {"Auto-sleep (no PMIC, so", "this is deep sleep, not a", "real power-off):", "sleeptime(n) sets n min", "sleeptime shows current", "G0/BtnA (top button) also", "sleeps/wakes on demand;", "wake retries saved wifi"},
     {"Wifi time sync (opt-in,", "never asked automatically):", "wifi(ssid,pass) saves +", "syncs via NTP (JST)", "wifi() retries saved creds", "wifi shows saved SSID"},
     {"Two calculators, one", "device (both live on the", "board, one per app slot):", "switch reboots into the", "  RPN calculator;", "  it has a switch back", "History kept apart; wifi", "  and sleeptime shared"},
-    {"Battery & uptime:", "battery = level %/volts", "uptime = time since last", "  boot/wake (resets on", "  sleep, like the clock)"},
+    {"Battery & uptime:", "battery = level %/volts", "BATT LOW appears in the", "  title below 3.1V; it is", "  a warning only, nothing", "  shuts down", "uptime = time since last", "  boot/wake (resets on", "  sleep, like the clock)"},
     {"Keys:", "fn+BkSp = clear all", "fn+;/.  = history up/down", "fn+,//  = cursor left/right", "opt+D   = deg/rad toggle", "Tab     = complete func name"},
 };
 
@@ -179,6 +179,49 @@ static size_t historyDisplayCap = 4;
 // CardputerSleep library — see cardputer-common.
 static const int WAKE_BUTTON_PIN = 0; // G0 / BtnA, the side button
 static CardputerSleep sleepMgr;
+
+// Low-battery warning. The cell reads about 4.1-4.2 V full and 3.0 V is the
+// discharge floor, so 3.1 V is the point where the user wants to be told.
+// This is deliberately display-only: the reading sags under load and moves
+// by tens of millivolts between samples, and a cell that still has usable
+// charge must not be taken away from the user on the strength of an
+// imprecise measurement. Nothing is ever switched off because of it.
+static const int16_t LOW_BATT_MV = 3100;       // warn once readings fall below this
+static const int16_t LOW_BATT_CLEAR_MV = 3250; // ...and stop warning above this
+static const uint32_t BATT_POLL_MS = 5000;
+static const int LOW_BATT_SAMPLES = 3;         // consecutive low polls before warning
+
+static bool lowBattery = false;
+static int lowBattStreak = 0;
+static uint32_t lastBattPollMillis = 0;
+static bool battPolled = false;
+
+// Returns true when the warning turned on or off, so the caller knows to
+// redraw. The gap between the warn and clear thresholds keeps it from
+// flickering while a reading hovers either side of 3.1 V.
+static bool updateLowBatteryState(int16_t mv) {
+    bool was = lowBattery;
+    if (mv <= 0) return false; // no reading available: leave the state alone
+    if (mv < LOW_BATT_MV) {
+        if (lowBattStreak < LOW_BATT_SAMPLES) lowBattStreak++;
+        if (lowBattStreak >= LOW_BATT_SAMPLES) lowBattery = true;
+    } else {
+        lowBattStreak = 0;
+        if (mv > LOW_BATT_CLEAR_MV) lowBattery = false;
+    }
+    return lowBattery != was;
+}
+
+// Reads the battery at most every BATT_POLL_MS. Returns true when the
+// display needs redrawing, so a calculator left untouched still raises the
+// warning instead of waiting for the next keypress.
+static bool pollBattery() {
+    uint32_t now = millis();
+    if (battPolled && now - lastBattPollMillis < BATT_POLL_MS) return false;
+    battPolled = true;
+    lastBattPollMillis = now;
+    return updateLowBatteryState(M5Cardputer.Power.getBatteryVoltage());
+}
 
 // ---------------------------------------------------------------------
 // switch: reboot into the other calculator
@@ -1193,6 +1236,10 @@ static void render() {
     canvas.setTextColor(TFT_GREEN, TFT_BLACK);
     canvas.setCursor(2, 2);
     canvas.printf("Adv Calc  [%s]", degMode ? "DEG" : "RAD");
+    if (lowBattery) {
+        canvas.setTextColor(TFT_RED, TFT_BLACK);
+        canvas.print("  BATT LOW");
+    }
 
     // expression + result are pinned to the bottom two lines
     int resultY = h - LINE_H - 2;
@@ -1429,6 +1476,10 @@ void loop() {
     }
 
     M5Cardputer.update();
+
+    // The battery is read on a timer rather than per keypress, so a
+    // calculator left sitting on the desk still puts the warning up.
+    if (pollBattery()) render();
 
     if (M5Cardputer.Keyboard.isChange()) {
         if (M5Cardputer.Keyboard.isPressed()) {
