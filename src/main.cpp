@@ -43,6 +43,7 @@
 //
 // Type "save" and press Enter to additionally append the current history
 // to /calc_log.txt on a microSD card, as plain text you can read on a PC.
+// "save(a note)" does the same and labels the block with that note.
 //
 // There's no RTC chip on this hardware, so there's no real clock (or
 // calendar) unless you set one. "timeset(H,M,S)" / "dateset(Y,M,D)" each
@@ -157,7 +158,7 @@ static const std::vector<std::vector<std::string>> helpPages = {
      "randint(lo,hi) inclusive", "abs floor ceil round int", "pi e x! ^ %", "ex: randint(1,6)=dice"},
     {"Previous results:", "ans = most recent result", "ans(n) = n-th most recent", "ex: ans(1)+ans(2)+ans(3)"},
     {"Graphs:", "plot(expr,xmin,xmax) draws", "  the curve; x is the", "  variable (only here)", "y range auto-fits, or give", "  plot(e,x0,x1,y0,y1)", "ex: plot(2*x-2,-10,10)", "Enter/BkSp exits the graph"},
-    {"Saving:", "History auto-saves to flash", "(survives power off, no SD", "card needed).", "Type save + Enter to also", "append it to calc_log.txt", "on a microSD card."},
+    {"Saving:", "History auto-saves to flash", "(survives power off, no SD", "card needed).", "Type save + Enter to also", "append it to calc_log.txt", "on a microSD card.", "save(a note) labels the", "  block with a comment"},
     {"Clock (no RTC on this", "board, resets each boot):", "timeset(H,M,S) / time", "dateset(Y,M,D) / date", "ex: timeset(9,30,0)", "ex: dateset(2026,9,13)"},
     {"USB drive mode:", "usbdrive exposes the SD", "card to a computer over", "USB. Needs reset/power-", "cycle to return to the", "calculator afterward.", "usbdebug shows why it", "failed, after a reset."},
     {"Auto-sleep (no PMIC, so", "this is deep sleep, not a", "real power-off):", "sleeptime(n) sets n min", "sleeptime shows current", "G0/BtnA (top button) also", "sleeps/wakes on demand;", "wake retries saved wifi"},
@@ -741,7 +742,9 @@ static void loadStateFromFlash() {
 
 // Appends the current in-memory history to /calc_log.txt on the SD card
 // as a labeled block, so re-running "save" doesn't overwrite older saves.
-static bool saveHistoryToSD() {
+// An optional comment (typed as "save(some note)") goes in the block's
+// header line, which is what makes an old block identifiable later.
+static bool saveHistoryToSD(const std::string& comment) {
     if (!sdReady) return false;
     File f = SD.open(SD_LOG_PATH, FILE_APPEND);
     if (!f) return false;
@@ -758,8 +761,10 @@ static bool saveHistoryToSD() {
     } else if (clock_.isTimeSet()) {
         tsSuffix = " @ " + clock_.timeString();
     }
-    f.printf("---- save #%u (%u entries, %s)%s ----\n", (unsigned)saveNum,
-              (unsigned)history.size(), degMode ? "DEG" : "RAD", tsSuffix.c_str());
+    std::string note;
+    if (!comment.empty()) note = " -- " + comment;
+    f.printf("---- save #%u (%u entries, %s)%s%s ----\n", (unsigned)saveNum,
+              (unsigned)history.size(), degMode ? "DEG" : "RAD", tsSuffix.c_str(), note.c_str());
     for (auto& h : history) {
         f.printf("%s = %s\n", h.expr.c_str(), h.result.c_str());
     }
@@ -871,7 +876,23 @@ static void evaluate() {
         return;
     }
     if (equalsIgnoreCase(expr, "save")) {
-        bool ok = saveHistoryToSD();
+        bool ok = saveHistoryToSD("");
+        resultLine = ok ? ("Saved to " + std::string(SD_LOG_PATH)) : "SD ERR (no card?)";
+        expr.clear();
+        haveResult = true;
+        browseIndex = -1;
+        cursorPos = 0;
+        return;
+    }
+    // save(comment): everything up to the final ")" is the comment, commas
+    // included -- it's one free-text argument, not a list. Same form as the
+    // RPN calculator's, so the habit carries between the two.
+    if (startsWithIgnoreCase(expr, "save(") && !expr.empty() && expr.back() == ')') {
+        std::string comment = expr.substr(5, expr.size() - 6);
+        size_t a = comment.find_first_not_of(' ');
+        size_t b = comment.find_last_not_of(' ');
+        comment = (a == std::string::npos) ? "" : comment.substr(a, b - a + 1);
+        bool ok = saveHistoryToSD(comment);
         resultLine = ok ? ("Saved to " + std::string(SD_LOG_PATH)) : "SD ERR (no card?)";
         expr.clear();
         haveResult = true;
