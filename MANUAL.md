@@ -160,6 +160,27 @@ ans(1)+ans(2) = 25
 
 ```
 
+**With a comment:** type `save(a note)` and the text goes into the block's
+header line, which is what makes an old block identifiable later. It is the
+same form as the RPN calculator's, so the habit carries between the two.
+
+```
+save(coil L=4.7mH at 60Hz) Enter
+```
+
+```
+---- save #2 (3 entries, RAD) @ 2026-09-13 09:47:12 -- coil L=4.7mH at 60Hz ----
+2+3 = 5
+10*2 = 20
+ans(1)+ans(2) = 25
+
+```
+
+Everything up to the final `)` is one free-text argument, not a list, so
+characters that normally separate things — `,` among them — can be typed as
+they are. The keyboard is ASCII only. An empty `save()` behaves exactly like
+a bare `save`.
+
 Each `save` appends a new labeled block rather than overwriting the file,
 so running it repeatedly builds up a running log — but note it re-writes
 whatever is currently in the on-screen history each time, so running `save`

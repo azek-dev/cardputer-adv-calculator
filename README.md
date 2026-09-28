@@ -36,7 +36,8 @@ your browser at **[azek-dev.github.io/cardputer-adv-calculator](https://azek-dev
 - History and DEG/RAD setting auto-save to internal flash and survive
   power-off, no SD card required
 - Type `save` and press Enter to also export the current history as plain
-  text to `calc_log.txt` on a microSD card
+  text to `calc_log.txt` on a microSD card; `save(a note)` labels the block
+  with that note
 - `timeset(H,M,S)` / `time` and `dateset(Y,M,D)` / `date` — a simple
   software clock and calendar (no RTC chip on this hardware), set
   independently of each other, timestamping `save` entries; both reset on
