@@ -99,6 +99,7 @@
 #include <CardputerUsbDrive.h>
 #include <CardputerSleep.h>
 #include "ExtDisplay.h"
+#include <driver/gpio.h>
 
 static M5Canvas canvas(&M5Cardputer.Display);
 
@@ -1454,15 +1455,27 @@ static void handleTab() {
     browseIndex = -1;
 }
 
-// The expansion screen's backlight runs straight off 5VOUT, so the best we
-// can do before deep sleep is leave it showing black rather than a frozen
-// calculator.
+// Before deep sleep: blank the expansion screen and switch its backlight off
+// (the backlight only obeys G4 once its LED pin is rewired there).
 static void beforeSleep() {
     saveStateToFlash();
     extBlank();
+    // Switch the expansion screen's backlight off and latch the pin LOW so it
+    // stays off while the chip sleeps (unlatched at the next boot).
+    digitalWrite(ext_display::PIN_BACKLIGHT, LOW);
+    gpio_hold_en((gpio_num_t)ext_display::PIN_BACKLIGHT);
+    gpio_deep_sleep_hold_en();
 }
 
 void setup() {
+    // Expansion-screen backlight (G4) stays dark until the panel has been
+    // reset and cleared further down, so a freshly reset panel's white
+    // screen never shows. Coming out of deep sleep the pin is still latched
+    // LOW from beforeSleep(); take it over as a LOW output before releasing.
+    pinMode(ext_display::PIN_BACKLIGHT, OUTPUT);
+    digitalWrite(ext_display::PIN_BACKLIGHT, LOW);
+    gpio_hold_dis((gpio_num_t)ext_display::PIN_BACKLIGHT);
+
     Serial.begin(115200);
     auto cfg = M5.config();
     M5Cardputer.begin(cfg, true);
@@ -1500,6 +1513,7 @@ void setup() {
         extLcd.setRotation(EXT_ROTATION);
         extLcd.fillScreen(TFT_BLACK);
     }
+    digitalWrite(ext_display::PIN_BACKLIGHT, HIGH);
 
     // Only right after waking from deep sleep via the G0 button — never on
     // a plain power-on — silently retry a saved Wi-Fi sync, since that's

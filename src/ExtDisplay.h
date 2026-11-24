@@ -2,8 +2,10 @@
 // (the clip-on "Cardputer ADV Expansion Screen"). It is an ILI9341 wired as:
 //   SCK G40 / MOSI G14 / MISO G39  -- shared with the microSD card (SD CS is G12)
 //   CS G5 / DC G6 / RST G3
-//   power from the header's 5VOUT; the backlight is not on any GPIO, so the
-//   screen cannot be switched off from software -- only blanked to black.
+//   power: header 5VOUT -> a small 3.3V regulator board (YP-8) -> panel VCC.
+//   Backlight (LED): rewired from the regulator output to EXT pin 3 = G4, so
+//   firmware can switch it (HIGH = on). Before that rewire G4 is unconnected
+//   and driving it does nothing.
 // The calculator mirrors its 240x135 canvas onto it, scaled up 4/3.
 #pragma once
 
@@ -12,6 +14,8 @@
 #include <lgfx/v1/platforms/esp32/Bus_SPI.hpp>
 
 namespace ext_display {
+
+static constexpr int PIN_BACKLIGHT = 4; // EXT pin 3
 
 struct Panel_ILI9341_Ext : public lgfx::Panel_LCD {
     Panel_ILI9341_Ext() {
