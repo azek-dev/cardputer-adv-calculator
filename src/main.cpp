@@ -1468,6 +1468,14 @@ static void beforeSleep() {
 }
 
 void setup() {
+    // Expansion-screen backlight (G4) stays dark until the panel has been
+    // reset and cleared further down, so a freshly reset panel's white
+    // screen never shows. Coming out of deep sleep the pin is still latched
+    // LOW from beforeSleep(); take it over as a LOW output before releasing.
+    pinMode(ext_display::PIN_BACKLIGHT, OUTPUT);
+    digitalWrite(ext_display::PIN_BACKLIGHT, LOW);
+    gpio_hold_dis((gpio_num_t)ext_display::PIN_BACKLIGHT);
+
     Serial.begin(115200);
     auto cfg = M5.config();
     M5Cardputer.begin(cfg, true);
@@ -1500,16 +1508,12 @@ void setup() {
     // Expansion screen: brought up after the SD card so both share the SPI
     // bus (the panel driver re-applies its own bus settings per transfer).
     // With nothing plugged in the writes simply go nowhere.
-    // Backlight on G4: release the hold that kept it off through deep sleep,
-    // then switch it on.
-    gpio_hold_dis((gpio_num_t)ext_display::PIN_BACKLIGHT);
-    pinMode(ext_display::PIN_BACKLIGHT, OUTPUT);
-    digitalWrite(ext_display::PIN_BACKLIGHT, HIGH);
     extReady = extLcd.init();
     if (extReady) {
         extLcd.setRotation(EXT_ROTATION);
         extLcd.fillScreen(TFT_BLACK);
     }
+    digitalWrite(ext_display::PIN_BACKLIGHT, HIGH);
 
     // Only right after waking from deep sleep via the G0 button — never on
     // a plain power-on — silently retry a saved Wi-Fi sync, since that's
